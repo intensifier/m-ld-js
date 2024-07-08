@@ -91,7 +91,7 @@ export interface OrmUpdating extends ReadLatchable {
 }
 
 /** @internal */
-export interface OrmScope extends EventEmitter {
+export interface OrmScope {
   /** The domain to which this scope belongs */
   readonly domain: OrmDomain;
   /** Destroys this scope including all cached subjects and event listeners */
@@ -350,19 +350,18 @@ export class OrmDomain implements MeldAppContext {
  * Private friend class of OrmDomain for created scopes
  * @internal
  */
-class _OrmScope extends EventEmitter implements OrmScope {
+class _OrmScope implements OrmScope {
   _cache = new Map<Iri, OrmSubject | Promise<OrmSubject>>();
+  eventEmitter = new EventEmitter();
 
   constructor(
     readonly domain: OrmDomain
-  ) {
-    super();
-  }
+  ) {}
 
   invalidate(): void {
-    this.removeAllListeners();
+    this.eventEmitter.removeAllListeners();
     this._cache.clear();
-    this.emit('invalidated');
+    this.eventEmitter.emit('invalidated');
   }
 
   /** emitted when an ORM subject has been removed from the domain */
@@ -377,18 +376,19 @@ class _OrmScope extends EventEmitter implements OrmScope {
   on(eventName: 'invalidated', listener: () => void): this;
   /** @override */
   on(eventName: string, listener: (...args: any[]) => void): this {
-    return super.on(eventName, listener);
+    this.eventEmitter.on(eventName, listener)
+    return this;
   }
 
   emitDeleted = (subject: OrmSubject) =>
-    this.emit('deleted', subject);
+    this.eventEmitter.emit('deleted', subject);
 
   get hasCacheMissListeners() {
-    return this.listenerCount('cacheMiss') > 0;
+    return this.eventEmitter.listenerCount('cacheMiss') > 0;
   }
 
   // Manual emission to return promise
   emitCacheMiss = (ref: GraphSubject, orm: OrmUpdating) =>
-    Promise.all(this.listeners('cacheMiss')
+    Promise.all(this.eventEmitter.listeners('cacheMiss')
       .map((listener: CacheMissListener) => listener(ref, orm)));
 }
