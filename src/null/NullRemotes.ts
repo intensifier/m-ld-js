@@ -1,4 +1,4 @@
-import { NEVER, type Observable, concat, of } from "rxjs";
+import { BehaviorSubject, NEVER, type Observable } from "rxjs";
 
 import { MeldRemotes, OperationMessage, MeldLocal } from "../engine";
 import type { LiveValue } from '../engine/api-support';
@@ -11,19 +11,10 @@ class NotImplementedError extends Error {
   }
 }
 
-const constantLiveValue = <T>(value: T): LiveValue<T> => {
-  // Emit `value`, then never complete.
-  const observable = concat(of(value), NEVER);
-  return Object.defineProperty(observable, "value", {
-    value,
-    writable: false,
-  }) as unknown as LiveValue<T>;
-};
-
 export class NullRemotes implements MeldRemotes {
   readonly operations: Observable<OperationMessage> = NEVER;
   readonly updates: Observable<OperationMessage> = NEVER;
-  readonly live: LiveValue<boolean | null> = constantLiveValue(false);
+  readonly live: LiveValue<boolean | null> = new BehaviorSubject(false);
 
   setLocal(_clone: MeldLocal | null): void {}
 
