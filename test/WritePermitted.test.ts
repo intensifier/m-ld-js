@@ -1,14 +1,19 @@
 import { SH } from '../src/ns';
-import { MockGraphState, mockInterim } from './testClones';
-import { WritePermitted } from '../src/constraints/WritePermitted';
+import { MockGraphState, mockInterim, testConfig, testContext } from './testClones';
+import { WritePermitted } from '../src/security';
 import { SubjectGraph } from '../src/engine/SubjectGraph';
-import { MeldError } from '../src/engine/MeldError';
+import { OrmDomain } from '../src/orm';
+import { MeldError } from '../src';
 
 describe('Write permissions', () => {
   let state: MockGraphState;
+  let domain: OrmDomain;
 
   beforeEach(async () => {
     state = await MockGraphState.create();
+    domain = new OrmDomain({
+      config: testConfig(), app: {}, context: await testContext
+    });
   });
 
   afterEach(() => state.close());
@@ -20,8 +25,10 @@ describe('Write permissions', () => {
 
   test('allows anything if no permissions', async () => {
     const writePermitted = new WritePermitted();
-    await writePermitted.initialise(state.graph.asReadState);
-    for (let constraint of (await writePermitted.ready()).constraints ?? [])
+    await domain.updating(state.graph.asReadState, orm =>
+      writePermitted.initFromData({ '@id': 'security/WritePermitted' }, orm));
+    expect.hasAssertions();
+    for (let constraint of writePermitted.constraints)
       await expect(constraint.check(state.graph.asReadState, mockInterim({
         '@delete': new SubjectGraph([]),
         '@insert': new SubjectGraph([{
@@ -34,9 +41,10 @@ describe('Write permissions', () => {
     await state.write(WritePermitted.declareControlled(
       'http://test.m-ld.org/namePermission', nameShape));
     const writePermitted = new WritePermitted();
-    await writePermitted.initialise(state.graph.asReadState);
+    await domain.updating(state.graph.asReadState, orm =>
+      writePermitted.initFromData({ '@id': 'security/WritePermitted' }, orm));
     expect.hasAssertions();
-    for (let constraint of (await writePermitted.ready()).constraints ?? [])
+    for (let constraint of writePermitted.constraints)
       await expect(constraint.check(state.graph.asReadState, mockInterim({
         '@delete': new SubjectGraph([]),
         '@insert': new SubjectGraph([{
@@ -49,9 +57,10 @@ describe('Write permissions', () => {
     await state.write(WritePermitted.declareControlled(
       'http://test.m-ld.org/namePermission', nameShape));
     const writePermitted = new WritePermitted();
-    await writePermitted.initialise(state.graph.asReadState);
+    await domain.updating(state.graph.asReadState, orm =>
+      writePermitted.initFromData({ '@id': 'security/WritePermitted' }, orm));
     expect.hasAssertions();
-    for (let constraint of (await writePermitted.ready()).constraints ?? [])
+    for (let constraint of writePermitted.constraints)
       await expect(constraint.check(state.graph.asReadState, mockInterim({
         '@delete': new SubjectGraph([]),
         '@insert': new SubjectGraph([{
@@ -67,9 +76,10 @@ describe('Write permissions', () => {
       'http://test.m-ld.org/hanna',
       { '@id': 'http://test.m-ld.org/namePermission' }));
     const writePermitted = new WritePermitted();
-    await writePermitted.initialise(state.graph.asReadState);
+    await domain.updating(state.graph.asReadState, orm =>
+      writePermitted.initFromData({ '@id': 'security/WritePermitted' }, orm));
     expect.hasAssertions();
-    for (let constraint of (await writePermitted.ready()).constraints ?? [])
+    for (let constraint of writePermitted.constraints)
       await expect(constraint.check(state.graph.asReadState, mockInterim({
         '@principal': { '@id': 'http://test.m-ld.org/hanna' },
         '@delete': new SubjectGraph([]),

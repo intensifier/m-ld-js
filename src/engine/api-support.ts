@@ -1,9 +1,9 @@
-import { defer, firstValueFrom, Observable } from 'rxjs';
+import { defer, firstValueFrom, merge, Observable } from 'rxjs';
 import { map, toArray } from 'rxjs/operators';
-import { Future, inflate, tapComplete } from './util';
 import { Consumable, each, flow } from 'rx-flowable';
 import { SubjectGraph } from './SubjectGraph';
 import { GraphSubject, GraphSubjects, ReadResult } from '../api';
+import { Future, tapComplete } from './Future';
 
 export interface LiveValue<T> extends Observable<T> {
   readonly value: T;
@@ -19,8 +19,10 @@ export function liveRollup<R extends { [key: string]: unknown }>(
       partial[k] = k === key ? value : liveValues[k].value);
     return partial as R;
   }
-  const values = defer(() => inflate(Object.keys(liveValues), (key: keyof R) =>
-    liveValues[key].pipe(map(value => get(key, value)))));
+  const values = defer(() => merge(
+    ...Object.keys(liveValues)
+      .map(key => liveValues[key].pipe(map(value => get(key, value)))))
+  );
   return Object.defineProperties(values, { value: { get } }) as LiveValue<R>;
 }
 

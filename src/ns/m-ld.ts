@@ -1,47 +1,51 @@
 export const $base = 'http://m-ld.org/';
+export const $vocab = `${$base}#`;
 
 /** Property for serialisation of transaction IDs in operation messages */
-export const tid = `${$base}#tid`;
+export const tid = `${$vocab}tid`;
+
+/** Property for serialisation of datatype operations in operation messages */
+export const op = `${$vocab}op`;
 
 /** Property for secret known only to domain users */
-export const secret = `${$base}#secret`;
+export const secret = `${$vocab}secret`;
 
 /** Class of encrypted operation envelope */
-export const Encrypted = `${$base}Encrypted`;
+export const Encrypted = `${$vocab}Encrypted`;
 
 /** Security Principal class */
-export const Principal = `${$base}Principal`;
+export const Principal = `${$vocab}Principal`;
 
 /** The local engine as a principal, used for e.g. operation voiding */
 export const localEngine = `${$base}principal/local-engine`;
 
 /** Property for asymmetric public key */
-export const publicKey = `${$base}#public-key`;
+export const publicKey = `${$vocab}public-key`;
 
 /**
  * Dual-use identifier:
  * - Property for Principal to have authority over a sh:Shape
  * - Singleton agreement condition
  */
-export const hasAuthority = `${$base}#has-authority`;
+export const hasAuthority = `${$vocab}has-authority`;
 
 /** Statute class */
-export const Statute = `${$base}Statute`;
+export const Statute = `${$vocab}Statute`;
 
 /** A reference to a SHACL shape whose target is statutory */
-export const statutoryShape = `${$base}#statutory-shape`;
+export const statutoryShape = `${$vocab}statutory-shape`;
 
-/** Access-controls a set of sh:Shapes */
-export const WritePermission = `${$base}WritePermission`;
+/** Class to access-control a set of sh:Shapes */
+export const WritePermission = `${$vocab}WritePermission`;
 
-/** A reference to a SHACL shape whose targets are permissioned */
-export const controlledShape = `${$base}#controlled-shape`;
+/** A reference to a SHACL shape whose targets are controlled */
+export const controlledShape = `${$vocab}controlled-shape`;
 
 /** Principal to Permission link */
-export const hasPermission = `${$base}#has-permission`;
+export const hasPermission = `${$vocab}has-permission`;
 
 /** A reference to a sufficient condition for an agreement */
-export const sufficientCondition = `${$base}#sufficient-condition`;
+export const sufficientCondition = `${$vocab}sufficient-condition`;
 
 /** Singleton list of m-ld extension declarations */
 export const extensions = `${$base}extensions`;
@@ -52,21 +56,33 @@ export namespace EXT {
    * 'security/ACL'
    */
   export const $base = 'http://ext.m-ld.org/';
+  /**
+   * Helper function to declare a type name
+   */
+  export function extensionType(extModule: string, className: string) {
+    return `${$base}${extModule}/${className}`;
+  }
 }
 
 export namespace JS {
   export const $base = 'http://js.m-ld.org/';
-
-  /** CommonJS module class */
-  export const commonJsModule = `${$base}CommonJSModule`;
+  export const $vocab = `${$base}#`;
 
   /** Property for CommonJS module require id */
-  export const require = `${$base}#require`;
+  export const require = `${$vocab}require`;
+
+  /** Property for ECMAScript module URL */
+  export const module = `${$vocab}module`;
 
   /** Property for Javascript class name (in module scope) */
-  export const className = `${$base}#class`;
+  export const className = `${$vocab}class`;
 }
 
+/**
+ * Class of LSEQ-like, default implementation of `@list`.
+ * TODO: Change to @vocab on next major release
+ * (left on base to avoid breaking non-experimental list data)
+ */
 export const rdflseq = `${$base}RdfLseq`;
 
 const rdflseqPosIdPre = `${rdflseq}/?=`;
@@ -92,13 +108,11 @@ export enum MeldMessageType {
 }
 
 export enum MeldRequestType {
-  clock = 'http://control.m-ld.org/request/clock',
   snapshot = 'http://control.m-ld.org/request/snapshot',
   revup = 'http://control.m-ld.org/request/revup'
 }
 
 export enum MeldResponseType {
-  clock = 'http://control.m-ld.org/response/clock',
   snapshot = 'http://control.m-ld.org/response/snapshot',
   revup = 'http://control.m-ld.org/response/revup',
   rejected = 'http://control.m-ld.org/response/rejected'

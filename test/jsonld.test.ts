@@ -1,5 +1,5 @@
 import {
-  ActiveContext, activeCtx, compactIri, compareValues, expandTerm, getValues
+  compareValues, expandValue, getValues, JsonldContext, minimiseValue
 } from '../src/engine/jsonld';
 
 describe('JSON-LD', () => {
@@ -8,45 +8,45 @@ describe('JSON-LD', () => {
     '@vocab': 'http://example.org/#',
     'mld': 'http://m-ld.org/'
   };
-  let ctx: ActiveContext;
+  let ctx: JsonldContext;
 
   beforeAll(async () => {
-    ctx = await activeCtx(context);
+    ctx = await JsonldContext.active(context);
   });
 
   describe('expand term', () => {
     test('expand prefix', () => {
-      expect(expandTerm('mld:hello', ctx)).toBe('http://m-ld.org/hello');
+      expect(ctx.expandTerm('mld:hello')).toBe('http://m-ld.org/hello');
     });
 
     test('ignores undefined prefix', () => {
-      expect(expandTerm('foo:hello', ctx)).toBe('foo:hello');
+      expect(ctx.expandTerm('foo:hello')).toBe('foo:hello');
     });
 
     test('leaves an IRI', () => {
-      expect(expandTerm('http://hello.com/', ctx)).toBe('http://hello.com/');
+      expect(ctx.expandTerm('http://hello.com/')).toBe('http://hello.com/');
     });
 
     test('expands against base', () => {
-      expect(expandTerm('hello', ctx)).toBe('http://example.org/hello');
+      expect(ctx.expandTerm('hello')).toBe('http://example.org/hello');
     });
   });
 
   describe('compact IRI', () => {
     test('compacts with prefix', () => {
-      expect(compactIri('http://m-ld.org/hello', ctx)).toBe('mld:hello');
+      expect(ctx.compactIri('http://m-ld.org/hello')).toBe('mld:hello');
     });
 
     test('ignores prefix', () => {
-      expect(compactIri('foo:hello', ctx)).toBe('foo:hello');
+      expect(ctx.compactIri('foo:hello')).toBe('foo:hello');
     });
 
     test('leaves an unmatched IRI', () => {
-      expect(compactIri('http://hello.com/', ctx)).toBe('http://hello.com/');
+      expect(ctx.compactIri('http://hello.com/')).toBe('http://hello.com/');
     });
 
     test('compacts using base', () => {
-      expect(compactIri('http://example.org/hello', ctx)).toBe('hello');
+      expect(ctx.compactIri('http://example.org/hello')).toBe('hello');
     });
   });
 
@@ -77,5 +77,91 @@ describe('JSON-LD', () => {
     // absolute IRIs do compare for reference and vocab reference
     expect(compareValues({ '@vocab': 'http://a' }, { '@id': 'http://a' })).toBe(true);
     expect(compareValues({ '@id': 'http://a' }, { '@vocab': 'http://a' })).toBe(true);
+  });
+
+  test('minimises values', () => {
+    expect(minimiseValue(1)).toBe(1);
+    expect(minimiseValue({ '@id': 'fred' })).toEqual({ '@id': 'fred' });
+    expect(minimiseValue({ '@id': 'fred', name: 'Fred' })).toEqual({ '@id': 'fred' });
+    expect(minimiseValue({ '@vocab': 'name', name: 'Name' })).toEqual({ '@vocab': 'name' });
+    expect(minimiseValue({ '@id': 'v1', '@value': 'Fred' }))
+      .toEqual({ '@id': 'v1', '@value': 'Fred' });
+  });
+
+  describe('expanding values', () => {
+    test('references & subjects', () => {
+      expect(expandValue(
+        'spouse', { '@id': 'fred' }))
+        .toEqual({ raw: 'fred', canonical: 'fred', type: '@id' });
+      expect(expandValue(
+        'spouse', { '@vocab': 'fred' }))
+        .toEqual({ raw: 'fred', canonical: 'fred', type: '@vocab' });
+      expect(expandValue(
+        'spouse', { '@id': 'fred', name: 'Fred' }))
+        .toEqual({ raw: 'fred', canonical: 'fred', type: '@id' });
+      expect(expandValue(
+        'spouse', { name: 'Fred' }))
+        .toEqual({ raw: { name: 'Fred' }, canonical: '', type: '@none' });
+    });
+    test('plain JSON values', () => {
+      expect(expandValue(
+        'name', 'Fred'))
+        .toEqual({ raw: 'Fred', canonical: 'Fred', type: 'http://www.w3.org/2001/XMLSchema#string' });
+      expect(expandValue(
+        'height', 1))
+        .toEqual({ raw: 1, canonical: '1', type: 'http://www.w3.org/2001/XMLSchema#integer' });
+      expect(expandValue(
+        'height', 1.1))
+        .toEqual({ raw: 1.1, canonical: '1.1E0', type: 'http://www.w3.org/2001/XMLSchema#double' });
+    });
+    test('type from context', async () => {
+      const ctx = await JsonldContext.active({
+        'name': {
+          '@id': 'http://test.m-ld.org/#name',
+          '@type': 'http://www.w3.org/2001/XMLSchema#string'
+        }
+      });
+      expect(expandValue(
+        'name', 'Fred', ctx))
+        .toEqual({
+          raw: 'Fred',
+          canonical: 'Fred',
+          type: 'http://www.w3.org/2001/XMLSchema#string'
+        });
+    });
+    test('language from context', async () => {
+      const ctx = await JsonldContext.active({
+        'name': { '@id': 'http://test.m-ld.org/#name', '@language': 'en-gb' }
+      });
+      expect(expandValue(
+        'name', 'Fred', ctx))
+        .toEqual({
+          raw: 'Fred',
+          canonical: 'Fred',
+          type: 'http://www.w3.org/2001/XMLSchema#string',
+          language: 'en-gb'
+        });
+    });
+    test('value objects', () => {
+      expect(expandValue(
+        'name', { '@value': 'Fred' }))
+        .toEqual({
+          raw: 'Fred',
+          canonical: 'Fred',
+          type: 'http://www.w3.org/2001/XMLSchema#string',
+          id: ''
+        });
+      expect(expandValue(
+        'name', {
+          '@value': 'Fred',
+          '@type': 'http://www.w3.org/2001/XMLSchema#string'
+        }))
+        .toEqual({
+          raw: 'Fred',
+          canonical: 'Fred',
+          type: 'http://www.w3.org/2001/XMLSchema#string',
+          id: ''
+        });
+    });
   });
 });

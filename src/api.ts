@@ -1,29 +1,27 @@
 import * as spec from '@m-ld/m-ld-spec';
+import { MeldErrorStatus } from '@m-ld/m-ld-spec';
 import type {
-  Query, Read, Reference, Subject, SubjectProperty, Update, Variable, Write
+  ExpandedTermDef, Query, Read, Reference, Subject, SubjectProperty, Update, Variable, Write
 } from './jrql-support';
+import { Expression, Value } from './jrql-support';
 import { Subscription } from 'rxjs';
 import { shortId } from './util';
 import { Iri } from '@m-ld/jsonld';
-import { QueryableRdfSource } from './rdfjs-support';
+import { BaseDataset, BaseDeleteInsert, QueryableRdfSource, UpdatableRdf } from './rdfjs-support';
 import { Consumable, Flowable } from 'rx-flowable';
 import { MeldMessageType } from './ns/m-ld';
-import { MeldApp } from './config';
-import { EncodedOperation } from './engine/index';
+import { MeldAppContext } from './config';
+import { EncodedOperation } from './engine';
 
 /**
- * A convenience type for a struct with a `@insert` and `@delete` property, like
- * a {@link MeldUpdate}.
+ * An update form that mirrors the structure of a {@link GraphUpdate}, having
+ * optional keys
+ * @category API
  */
-export interface DeleteInsert<T> {
-  readonly '@delete': T;
-  readonly '@insert': T;
-}
+export type UpdateForm<T> = Partial<{ [verb in keyof GraphUpdate]: T }>
 
 /** @internal */
-export function isDeleteInsert(o: any): o is DeleteInsert<unknown> {
-  return '@insert' in o && '@delete' in o;
-}
+export type Assertions = UpdateForm<GraphSubject[] | GraphSubject>;
 
 /**
  * A utility to generate a variable with a unique Id. Convenient to use when
@@ -44,9 +42,15 @@ let nextAny = 0x1111;
 export const anyName = (): string => shortId((nextAny++).toString(16));
 
 // Unchanged from m-ld-spec
-/** @see m-ld [specification](http://spec.m-ld.org/interfaces/livestatus.html) */
+/**
+ * @category API
+ * @see m-ld [specification](http://spec.m-ld.org/interfaces/livestatus.html)
+ */
 export type LiveStatus = spec.LiveStatus;
-/** @see m-ld [specification](http://spec.m-ld.org/interfaces/meldstatus.html) */
+/**
+ * @category API
+ * @see m-ld [specification](http://spec.m-ld.org/interfaces/meldstatus.html)
+ */
 export type MeldStatus = spec.MeldStatus;
 
 /**
@@ -116,8 +120,9 @@ export interface ReadResult extends Flowable<GraphSubject>, PromiseLike<GraphSub
  * Read methods for a {@link MeldState}.
  *
  * Methods are typed to ensure that app code is aware of **m-ld**
- * [data&nbsp;semantics](http://spec.m-ld.org/#data-semantics). See the
- * [Resource](/#resource) type for more details.
+ * [data&nbsp;semantics](http://spec.m-ld.org/#data-semantics).
+ * @category API
+ * @see {@link MeldState}
  */
 export interface MeldReadState extends QueryableRdfSource {
   /**
@@ -177,12 +182,12 @@ export interface MeldReadState extends QueryableRdfSource {
  * until either a write is performed in the procedure, or the procedure's
  * asynchronous return promise resolves or rejects.
  *
- *
  * @see {@link MeldStateMachine.read}
  * @see {@link MeldStateMachine.write}
  * @see m-ld [specification](http://spec.m-ld.org/interfaces/meldupdate.html)
+ * @category API
  */
-export interface MeldState extends MeldReadState {
+export interface MeldState extends MeldReadState, UpdatableRdf<MeldState> {
   /**
    * Actively writes data to the domain.
    *
@@ -194,7 +199,7 @@ export interface MeldState extends MeldReadState {
    * @typeParam W one of the {@link Write} types
    * @returns the next state of the domain, changed by this write operation only
    */
-  write<W = Write>(request: W): Promise<MeldState>;
+  write<W extends Write = Write>(request: W): Promise<MeldState>;
   /**
    * Shorthand method for deleting a single Subject by its `@id`. This will also
    * remove references to the given Subject from other Subjects.
@@ -226,12 +231,30 @@ export interface GraphSubjects extends Array<GraphSubject> {
    * by serialised to JSON as it may not be acyclic.
    */
   graph: ReadonlyMap<Iri, GraphSubject>;
+  /**
+   * The graph, presented as an RDF dataset. This field will not be included in
+   * the JSON representation of the graph.
+   */
+  quads: BaseDataset;
+}
+
+// Note this must not be @internal, else TypeDoc ignores the interface too
+export namespace GraphSubjects {
+  /** Empty graph implementation (immutable) */
+  export const EMPTY: GraphSubjects =
+    Object.assign([], { graph: new Map(), quads: [] });
+}
+
+/** @internal */
+export function isGraphSubjects(subjects: GraphSubject[]): subjects is GraphSubjects {
+  return 'graph' in subjects;
 }
 
 /**
  * An update arising from a write operation to **m-ld** graph data.
+ * @category API
  */
-export interface GraphUpdate extends DeleteInsert<GraphSubjects> {
+export interface GraphUpdate {
   /**
    * Partial subjects, containing properties that have been deleted from the
    * domain. Note that deletion of a property (even of all properties) does not
@@ -244,6 +267,19 @@ export interface GraphUpdate extends DeleteInsert<GraphSubjects> {
    * domain.
    */
   readonly '@insert': GraphSubjects;
+  /**
+   * Partial subjects, containing only properties with a {@link SharedDatatype}
+   * in the domain, which have been operated on. Subject property values under
+   * this key will typically be inline constraint expressions using mutation
+   * operators like `@plus`, which must be interpreted by the receiving code.
+   *
+   * Note that most data changes appear as combinations of `@delete` and
+   * `@insert`, even if the original user update used the `@update` keyword,
+   * because most data in the domain comprises atomic immutable values which are
+   * updated by replacement. Shared data types, in contrast, are mutable and
+   * their updates can only be provided using expressions.
+   */
+  readonly '@update': GraphSubjects;
 }
 
 /**
@@ -251,6 +287,7 @@ export interface GraphUpdate extends DeleteInsert<GraphSubjects> {
  * has not yet been signalled to the application. Available to triggered rules
  * like {@link MeldConstraint constraints} and
  * {@link AgreementCondition agreement&nbsp;conditions}.
+ * @category API
  */
 export interface MeldPreUpdate extends GraphUpdate {
   /**
@@ -296,6 +333,7 @@ export interface MeldUpdate extends MeldPreUpdate {
  * @typeParam S can be {@link MeldReadState} (default) or {@link MeldState}. If
  * the latter, the state can be transitioned to another immutable state using
  * {@link MeldState.write}.
+ * @category API
  */
 export type StateProc<S extends MeldReadState = MeldReadState, T = unknown> =
   (state: S) => PromiseLike<T> | T;
@@ -305,9 +343,28 @@ export type StateProc<S extends MeldReadState = MeldReadState, T = unknown> =
  * available as immutable following an update. Strictly, the immutable state is
  * guaranteed to remain 'live' until the procedure's return Promise resolves or
  * rejects.
+ * @category API
  */
-export type UpdateProc<U extends MeldPreUpdate = MeldUpdate, T = unknown> =
-  (update: U, state: MeldReadState) => PromiseLike<T> | void;
+export type UpdateProc<U extends MeldPreUpdate = MeldUpdate, T = void> =
+  (update: U, state: MeldReadState) => PromiseLike<T> | T;
+
+/**
+ * A subscription to a state machine. Can be unsubscribed to stop receiving
+ * updates. The subscription itself can also be async-iterated. Finally, the
+ * subscription may have a resolved value that can be awaited.
+ *
+ * When used as an async iterable, it's important to begin iteration
+ * synchronously in order not to miss any updates. It is safe to await the
+ * subscription resolved value, if applicable – but it's rare to need _both_ the
+ * resolved value _and_ iteration.
+ *
+ * When used as a promise, calling unsubscribe before the promise is settled may
+ * cause it to reject with `EmptyError`.
+ * @category API
+ */
+export type MeldStateSubscription<T = never> = Subscription &
+  AsyncGenerator<[MeldUpdate, MeldReadState]> &
+  PromiseLike<T>;
 
 /**
  * A m-ld state machine extends the {@link MeldState} API for convenience, but
@@ -315,36 +372,69 @@ export type UpdateProc<U extends MeldPreUpdate = MeldUpdate, T = unknown> =
  * consecutive asynchronous reads will not necessarily operate on the same
  * state. To work with immutable state, use the `read` and `write` method
  * overloads taking a procedure.
+ * @category API
  */
 export interface MeldStateMachine extends MeldState {
   /**
    * Handle updates from the domain, from the moment this method is called. All
-   * data changes are signalled through the handler, strictly ordered according
-   * to the clone's logical clock. The updates can therefore be correctly used
-   * to maintain some other view of data, for example in a user interface or
-   * separate database. This will include the notification of 'rev-up' updates
-   * after a connect to the domain. To change this behaviour, ignore updates
-   * while the clone status is marked as `outdated`.
+   * data changes are signalled, strictly ordered according to the clone's
+   * logical clock. The updates can therefore be correctly used to maintain some
+   * other view of data, for example in a user interface or separate database.
+   * This will include the notification of 'rev-up' updates after a connect to
+   * the domain. To change this behaviour, ignore updates while the clone status
+   * is marked as `outdated`.
+   *
+   * The updates can be received either using the optional handler method, or by
+   * async-iterating the returned subscription, e.g.:
+   *
+   * ```typescript
+   * for await (let [update] of clone.follow()) {
+   *   // Do something with the update
+   * }
+   * ```
    *
    * This method is equivalent to calling {@link read} with a no-op procedure.
    *
    * @param handler a procedure to run for every update
    * @returns a subscription, allowing the caller to unsubscribe the handler
    */
-  follow(handler: UpdateProc): Subscription;
+  follow(handler?: UpdateProc): MeldStateSubscription;
 
   /**
    * Performs some read procedure on the current state, with notifications of
    * subsequent updates.
    *
-   * The state passed to the procedure is immutable and is guaranteed to remain
-   * 'live' until the procedure's return Promise resolves or rejects.
+   * The updates can be received either using the optional handler method, or by
+   * async-iterating the returned subscription, e.g.:
+   *
+   * ```typescript
+   * const subs = clone.read(async state => {
+   *   // Do something with the initial state
+   * });
+   * for await (let [update] of subs) {
+   *   // Do something with the updates that follow the initial state
+   * }
+   * ```
+   *
+   * > NOTE: if the state procedure throws, it's up to you to handle the
+   * rejection; otherwise a global unresolved rejection may occur.
+   *
+   * The states passed to the procedure and the handler are immutable and
+   * guaranteed to remain 'live' until the procedure's return Promise resolves
+   * or rejects. If iterating, the iterated states are immutable until `next`,
+   * `return` or `throw` are called on the generator – if a `for await` loop is
+   * being used, these will be called by Javascript as the loop continues or
+   * terminates.
    *
    * @param procedure a procedure to run for the current state
    * @param handler a procedure to run for every update that follows the state
    * in the procedure
+   * @returns a subscription, allowing the caller to unsubscribe the handler
    */
-  read(procedure: StateProc, handler?: UpdateProc): Subscription;
+  read<T>(
+    procedure: StateProc<MeldReadState, T>,
+    handler?: UpdateProc
+  ): MeldStateSubscription<T>;
 
   /**
    * Actively reads data from the domain.
@@ -353,9 +443,9 @@ export interface MeldStateMachine extends MeldState {
    * result, or calling `.then`.
    *
    * All results are guaranteed to derive from the current state; however since
-   * the observable results are delivered asynchronously, the current state is
-   * not guaranteed to be live in the subscriber. In order to keep this state
-   * alive during iteration (for example, to perform a consequential operation),
+   * the results are delivered asynchronously, the current state is not
+   * guaranteed to be live in the subscriber. In order to keep this state alive
+   * during iteration (for example, to perform a consequential operation),
    * perform the request in the scope of a read procedure instead.
    *
    * @param request the declarative read description
@@ -399,6 +489,10 @@ export interface MeldStateMachine extends MeldState {
  */
 export interface MeldClone extends MeldStateMachine {
   /**
+   * The context in use for the clone API.
+   */
+  readonly context: MeldContext;
+  /**
    * The current and future status of a clone. This stream is hot and
    * continuous, terminating when the clone closes (and can therefore be used to
    * detect closure).
@@ -415,57 +509,130 @@ export interface MeldClone extends MeldStateMachine {
 }
 
 /**
- * Some component of type `T` that is loaded from domain state. The current
- * value may change as the domain evolves; and may also be temporarily
- * unavailable during an update.
- * @internal
+ * In **m-ld**, all API interactions are done 'in context'. All identifiers of
+ * significant data entities, including [Subjects](/#subjects), properties and
+ * types are actually [IRIs](https://www.w3.org/TR/json-ld/#iris), but in an API
+ * call they may appear to be simple strings.
+ *
+ * The default context for API calls in **m-ld** (if not overridden in the
+ * {@link MeldConfig config}), uses the provided domain name to scope all
+ * identifiers, as follows:
+ *
+ * - Subject identities are prefixed with `http://≪domain≫/` (the so-called
+ * "base" of the domain)
+ * - property names and types are prefixed with `http://≪domain≫/#` (note the
+ * extra hash; this is the so-called "vocabulary", or "vocab" of the domain)
+ *
+ * A `MeldContext` allows an application to translate between simple strings and
+ * IRIs. This is typically only necessary in advanced use-cases, such as when
+ * creating constraints.
+ *
+ * @see https://www.w3.org/TR/json-ld/#the-context
+ * @category API
  */
-export interface StateManaged<T> {
+export interface MeldContext {
   /**
-   * Get the current or next available value, ready for use (or a rejection,
-   * e.g. if the clone is shutting down).
+   * Expand an identifier to its full IRI
+   * @param value the identifier to expand
+   * @param options whether to expand according to the vocab (or otherwise the base)
    */
-  ready(): Promise<T>;
+  expandTerm(value: string, options?: { vocab?: boolean }): Iri;
   /**
-   * Initialises the extensions against the given clone state. This method could
-   * be used to read significant state into memory for the efficient
-   * implementation of an extension's function.
+   * Compact an IRI to its short identifier
+   * @param iri the IRI to compact
+   * @param options whether to compact according to the vocab (or otherwise the base)
    */
-  readonly initialise?: StateProc;
+  compactIri(iri: Iri, options?: { vocab?: boolean }): string;
   /**
-   * Called to inform the extensions of an update to the state, _after_ it has
-   * been applied. If available, this procedure will be called for every state
-   * after that passed to {@link initialise}.
+   * Obtain additional information about a given context key
+   * @param key context entry key
+   * @param type expanded term definition key
+   * @see https://www.w3.org/TR/json-ld/#expanded-term-definition
    */
-  readonly onUpdate?: UpdateProc<MeldPreUpdate>;
+  getTermDetail(key: string, type: keyof ExpandedTermDef): string | null;
 }
 
 /**
- * Extensions applied to a **m-ld** clone.
+ * [Extensions](/#extensions) applied to a **m-ld** clone.
  *
- * In general, extensions should be dynamically selected and loaded based on the
- * clone's (meta)data content – this allows a domain to evolve without
- * necessitating the redeployment of app code.
+ * Extensions can then be installed in two ways:
+ * 1. By providing the implementation in the `app` parameter of the [clone
+ * function](/#clone).
+ * 2. By declaring a module in the domain information.
  *
- * > ⚠ Changing extensions at runtime may require coordination between clones,
- * to prevent outdated clones from acting incorrectly in ways that could cause
- * data corruption or compromise security. Consult the extension's documentation
- * for safe operation.
+ * The first option is suitable when the data is always going to be used by the
+ * same app – because the app will always know it has to include the extension.
+ *
+ * The second option is more suitable if the data may be shared to other apps,
+ * because the need for the extension is declared in the data itself, and apps
+ * can load it dynamically as required.
+ *
+ * To write an extension to be declared in the domain data, implement
+ * MeldExtensions with one or more of its methods, in a Javascript class. Then,
+ * to declare the extension in the domain, you write:
+ *
+ * ```json
+ * {
+ *   "@id": "http://m-ld.org/extensions",
+ *   "@list": {
+ *     "≪priority≫": {
+ *       "@id": "≪your-extension-iri≫",
+ *       "http://js.m-ld.org/#require": "≪your-extension-module≫",
+ *       "http://js.m-ld.org/#class": "≪your-extension-class-name≫"
+ *     }
+ *   }
+ * }
+ * ```
+ *
+ * Breaking this down:
+ *
+ * - `"http://m-ld.org/extensions"` is the identity of the extensions list. This
+ * is a constant that **m-ld** knows about (it's in the `m-ld.org` domain).
+ * - The extensions list is declared as a [List](https://spec.m-ld.org/#lists),
+ * with the `@list` keyword, because extensions are ordered by priority.
+ * - The value you give for `≪priority≫` (a number) will determine where in the
+ * list your extension appears. The highest priority is `"0"`. The value is
+ * decided by you, based on what you know about your extensions. In most cases
+ * it won't matter, since extensions shouldn't interfere with each other.
+ * - The `"http://js.m-ld.org/#require"` and `"http://js.m-ld.org/#class"`
+ * properties tell the module loader how to instantiate your module class. It
+ * will call a global `require` function with the first, dereference the second
+ * and call `new` on it.
+ *
+ * Most extensions will provide a static convenience function to generate this
+ * JSON, which can be called in the genesis clone
+ * ([example](/classes/writepermitted.html#declare)).
+ *
+ * @category API
+ */
+export interface MeldPlugin extends Partial<MeldExtensions> {
+  /**
+   * Give the extensions some context
+   */
+  setExtensionContext?(context: MeldAppContext): void;
+}
+
+/**
+ * Strict definitions of the extension types available
+ *
+ * @category API
  */
 export interface MeldExtensions {
   /**
    * Data invariant constraints applicable to the domain.
-   *
-   * @experimental
-   * @see https://github.com/m-ld/m-ld-spec/issues/73
    */
-  readonly constraints?: Iterable<MeldConstraint>;
+  readonly constraints: Iterable<MeldConstraint>;
+  /**
+   * Indirected {@link Datatype data types} applicable to the domain, accessed
+   * by an injective function.
+   */
+  readonly indirectedData: IndirectedData;
   /**
    * Agreement preconditions applicable to the domain.
    *
    * @experimental
    */
-  readonly agreementConditions?: Iterable<AgreementCondition>;
+  readonly agreementConditions: Iterable<AgreementCondition>;
   /**
    * A transport security interceptor. If the initial transport security is not
    * compatible with the rest of the domain, this clone may not be able to join
@@ -473,7 +640,7 @@ export interface MeldExtensions {
    *
    * @experimental
    */
-  readonly transportSecurity?: MeldTransportSecurity;
+  readonly transportSecurity: MeldTransportSecurity;
 }
 
 /**
@@ -489,11 +656,10 @@ export interface MeldExtensions {
  * In this clone engine, constraints are checked and applied for updates prior
  * to their application to the data (the updates are 'interim'). If the
  * constraint requires to know the final state, it must infer it from the given
- * reader and the update.
+ * state and the update.
  *
  * @see [m-ld concurrency](http://m-ld.org/doc/#concurrency)
- * @experimental
- * @category Experimental
+ * @category API
  */
 export interface MeldConstraint {
   /**
@@ -544,7 +710,7 @@ export interface MeldConstraint {
  * reference some immutable data such as specific block in a blockchain, or an
  * append-only table row.
  *
- * @see {@link WriteOptions.agree}
+ * @see {@link Update}
  * @todo clone status notification on receipt of a violating remote operation
  * @experimental
  * @category Experimental
@@ -568,9 +734,7 @@ export interface AgreementCondition {
 
 /**
  * An update to which further updates can be asserted or entailed.
- *
- * @experimental
- * @category Experimental
+ * @category API
  */
 export interface InterimUpdate {
   /**
@@ -580,7 +744,7 @@ export interface InterimUpdate {
    *
    * An assertion is incorporated into the final update sent to other clones and
    * echoed to the local app. Examples of assertions:
-   * - Delete previous value from a single-value register
+   * - Recover a previous value into an empty mandatory property
    * - Rewrite a list index predicate to a CRDT-specific form
    *
    * @param update the update to assert into the domain
@@ -596,6 +760,13 @@ export interface InterimUpdate {
    * local app. Examples of entailments:
    * - The size of a collection
    * - Membership of a duck-type class
+   * - Removal of excess property values
+   *
+   * Note that graph edges that are deleted by entailments retain a hidden
+   * presence in the clone metadata, commonly known as a 'tombstone'. Since this
+   * can give rise to unbounded storage use, constraints should endeavour to
+   * remove these hidden graph edges when the opportunity arises. They can be
+   * obtained using the {@link #hidden} method.
    *
    * @param update the update to entail into the domain
    * @see {@link update}
@@ -612,23 +783,40 @@ export interface InterimUpdate {
    *    constraint. An attempt to remove an assertion made in the original
    *    update will be ignored, which may lead to unexpected results.
    *
-   * @param key Whether to remove `@delete` or `@insert` components
-   * @param pattern the Subject assertions to remove
+   * @param assertions Subject assertions to remove
    * @see {@link update}
    */
-  remove(key: keyof DeleteInsert<any>, pattern: Subject | Subject[]): void;
+  remove(assertions: Assertions): void;
   /**
-   * Substitutes the given alias for the given property subject, property, or
-   * subject and property, in updates provided to the application. This allows a
-   * constraint to hide a data implementation detail.
+   * Substitutes the given alias for the given property or subject and property,
+   * in updates provided to the application. This allows a constraint to hide a
+   * data implementation detail.
    *
    * @param subjectId the subject to which the alias applies
-   * @param property if `@id`, the subject IRI is aliased. Otherwise, the
-   * property is aliased.
-   * @param alias the alias for the given subject and/or property. It is an
-   * error if the property is `@id` and a `SubjectProperty` alias is provided.
+   * @param property the property to be aliased
+   * @param alias the alias for the given property
    */
-  alias(subjectId: Iri | null, property: '@id' | Iri, alias: Iri | SubjectProperty): void;
+  alias(subjectId: Iri | null, property: Iri, alias: SubjectProperty): void;
+  /**
+   * Substitutes the given alias for the given subject, in updates provided to
+   * the application. This allows a constraint to hide a data implementation
+   * detail.
+   *
+   * @param subjectId the subject to which the alias applies
+   * @param property `@id` to indicate that the subject IRI is aliased
+   * @param alias the alias for the given subject
+   */
+  alias(subjectId: Iri, property: '@id', alias: Iri): void;
+  /**
+   * Recovers hidden graph edges for the given subject and property; that is,
+   * values that have been deleted from the graph by {@link entail entailment}.
+   * Hidden edges can be removed permanently by {@link assert asserting} their
+   * deletion.
+   *
+   * @param subjectId the subject for which to obtain the graph edge
+   * @param property the property for which to obtain the graph edge
+   */
+  hidden(subjectId: Iri, property: Iri): Consumable<Value>;
   /**
    * A promise that resolves to the current update. If any modifications made by
    * the methods above have affected the `@insert` and `@delete` of the update,
@@ -638,10 +826,188 @@ export interface InterimUpdate {
 }
 
 /**
+ * A function type to find the correct {@link Datatype} for an identifier and
+ * optionally a property in the domain.
+ *
+ * If `property` is provided, `datatype` is the datatype of a literal at the
+ * given property position in a Subject. Otherwise, it is the identity of the
+ * datatype itself (which may be the same).
+ * @see Datatype
+ * @category API
+ */
+export type IndirectedData =
+  (datatype: Iri, property?: Iri) => Datatype | undefined;
+
+/**
+ * A Datatype is a handler for data in the domain that is 'indirected'. This
+ * means that its validation and storage is separate to the internal graph
+ * representation that is used for all other Subject properties.
+ *
+ * A plain indirected data type is primarily used as an optimisation, to improve
+ * the cost of internal data indexing. However, a {@link SharedDatatype Shared}
+ * data type adds the capability to present specialist mutable data with its own
+ * algorithms for reconciling concurrent mutations.
+ *
+ * @typeParam Data - data type
+ * @category API
+ */
+export interface Datatype<Data = unknown> {
+  /**
+   * The identity of the datatype itself. Used in the internal representation,
+   * which is visible to query filters; but a canonical json-rql Value is
+   * substituted in retrieval and updates.
+   */
+  readonly '@id': string;
+  /**
+   * Obtains a (preferably short) identity for the given data, which is
+   * consistent with equality between data objects. The identity value is only
+   * visible to query filters; the data is {@link #toValue indirected} in
+   * retrieval and updates.
+   */
+  getDataId(data: Data): string;
+  /**
+   * Parses a value provided by the app. This may give the application some
+   * leeway in type strictness; but note that the value provided back to the app
+   * will always be that returned by {@link Datatype#toValue}, if
+   * provided, or the `Data` itself if not.
+   *
+   * If the provided value is an expanded `ValueObject`, its datatype will be a
+   * fully pre-expanded IRI.
+   *
+   * @returns the valid data, or undefined if the data is not valid
+   * @throws TypeError if a validation message is indicated
+   */
+  validate(value: Value): Data | undefined;
+  /**
+   * Provides a value to appear when the data is retrieved. The datatype should
+   * always accept the returned value forms in its `validate` method. If the
+   * value's type should be anything other than this datatype's `@id`, a
+   * `ValueObject` should be returned including the desired `@type`, even if
+   * it's a built-in type like xs:string. The value object will be compacted as
+   * normal in the application API.
+   *
+   * If the returned value is an expanded `ValueObject`, its datatype MUST be a
+   * fully expanded IRI.
+   *
+   * If this method is not provided, the data itself MUST be a valid API value.
+   */
+  toValue?(data: Data): Value;
+  /**
+   * Convert data to a representation that can be stringified to JSON. If this
+   * method is not provided, the data itself must be JSON serialisable. The
+   * implementation should include a version if the format is likely to change.
+   * @see fromJSON
+   */
+  toJSON?(data: Data): any;
+  /**
+   * Deserialises data. If this method is not provided, the data must be
+   * directly deserialisable from JSON.
+   * @see toJSON
+   */
+  fromJSON?(json: any): Data;
+}
+
+/**
+ * A shared data type provides a custom algorithmic abstract data type for
+ * atomic, mutable subject property values in the domain. The implementation
+ * must be able to guarantee convergence of values in remote clones after local
+ * updates and remote operations.
+ *
+ * Within the supporting framework of **m-ld**, a shared data type defines a
+ * [Conflict-free Shared Data Type (CRDT)](https://crdt.tech/). That support
+ * comprises the following features which may simplify the requirements on the
+ * implementation:
+ *
+ * 1. Operations will only be {@link apply applied} _once_. The implementation
+ * therefore does not need to ensure that operations are _idempotent_ (though it
+ * still needs to ensure they are _commutative_).
+ *
+ * 2. Operations will be {@link apply applied} in [causal
+ * order](https://link.springer.com/chapter/10.1007/3-540-44520-X_4). The
+ * implementation does not need to maintain clock information for processes,
+ * unless this is needed for some aspect of the merge algorithm beyond causal
+ * ordering _per se_.
+ *
+ * 3. Data state is maintained in memory for 'active' shared data which is being
+ * operated on, for example a user typing into a document. The methods of this
+ * class allow state to be mutated without copying.
+ *
+ * @typeParam Data - data type
+ * @typeParam Operation - operation type; must be JSON-serialisable
+ * @typeParam Revert - reversion local metadata type; must be JSON-serialisable
+ * @category API
+ */
+export interface SharedDatatype<Data, Operation, Revert = never> extends Datatype<Data> {
+  /**
+   * A shared data type MUST always generate a new unique identity as its
+   * lexical value, for which mutable state will exist. This will only be called
+   * once per logical instance.
+   */
+  getDataId(): UUID;
+  /**
+   * Intercepts update of data. The implementation is welcome to mutate the
+   * passed `state` and return it as the new state. Doing so is encouraged if
+   * the state is memory-intensive, as only a single copy will be maintained in
+   * memory across multiple {@link apply operations} and updates. The backend
+   * may later revert the returned operation in case of rollback.
+   *
+   * @param state the new state of the shared value
+   * @param update the json-rql expression used to perform the update
+   * @returns the new state of the data, an operation which can be
+   * {@link apply applied}, and any additional local metadata required to revert
+   * the operation (if applicable). If the revert is not supplied, it is assumed
+   * that no metadata is required to revert the operation.
+   */
+  update(state: Data, update: Expression): [Data, Operation, Revert?];
+  /**
+   * Applies an operation to some state. The implementation is welcome to mutate
+   * the passed `state` and return it as the new state. Doing so is encouraged
+   * if the state is memory-intensive, as only a single copy will be maintained
+   * in memory across multiple operations and {@link update updates}.
+   *
+   * @param state the existing state of the shared value
+   * @param reversions any reversions (voiding) to apply _before_ the new
+   * operation, provided in reverse order of original application
+   * @param [operation] the operation being applied, created using {@link update}
+   * on another clone. If `undefined`, only reversions are being requested.
+   * @returns the new state (can be the input), an update expression to notify
+   * the app, and local metadata required to revert the operation (if applicable).
+   */
+  apply(
+    state: Data,
+    reversions: [Operation, Revert?][],
+    operation?: Operation
+  ): [Data, Expression | Expression[], Revert?];
+  /**
+   * Fuses local operations into a single operation. Operations are be provided
+   * in contiguous application order. Reversion metadata may not be included in
+   * the parameters; if so, it's not required in the return.
+   */
+  fuse(
+    operation: [Operation, Revert?],
+    suffix: [Operation, Revert?]
+  ): [Operation, Revert?];
+  /**
+   * Cuts the prefix from the given operation and returns an operation which can
+   * be safely applied to a state that has the prefix already applied, e.g.
+   * - If the operation type is a list of sequential operations, the result can
+   * be a slice of the given operation at the prefix length.
+   * - If this datatype's operations are idempotent, the operation can be
+   * returned as-is.
+   */
+  cut(prefix: Operation, operation: Operation): Operation | undefined;
+}
+
+/** @internal */
+export function isSharedDatatype<T>(dt: Datatype<T>): dt is SharedDatatype<T, unknown, unknown> {
+  return 'update' in dt;
+}
+
+/**
  * An identified security principal (user or machine) that is responsible for
  * data changes in the clone.
  *
- * > 🚧 Application security extensions using `AppPrincipal` are currently
+ * > 🧪 Application security extensions using `AppPrincipal` are currently
  * experimental. See the [discussion](https://m-ld.org/doc/#security) of general
  * security principles for using **m-ld**, and the
  * [recommendations](/#security) for this engine.
@@ -666,6 +1032,8 @@ export interface AppPrincipal {
 /**
  * Attribution of some data to a responsible security principal.
  * @see MeldApp.principal
+ * @category Experimental
+ * @experimental
  */
 export interface Attribution {
   /**
@@ -682,6 +1050,8 @@ export interface Attribution {
 
 /**
  * Underlying Protocol information that gave rise to an update
+ * @category Experimental
+ * @experimental
  */
 export interface AuditOperation {
   /**
@@ -706,8 +1076,17 @@ export interface AuditOperation {
  * operations, each of which is well-defined in the **m-ld** protocol. This
  * means that a sufficiently sophisticated auditing system would be able to
  * re-create, and therefore verify, the trace provided.
+ * @category Experimental
+ * @experimental
  */
 export interface UpdateTrace {
+  /**
+   * Defined if the operation was not processed due to the specified error. Such
+   * errors will always be indicative of a bad request. Catastrophic errors such
+   * as crashes will instead cause the clone itself to shut down in an error
+   * state; see {@link MeldClone#status}.
+   */
+  readonly error?: MeldError;
   /**
    * The operation that directly triggered an app update, either a local write
    * or an arriving remote operation. This operation always exists but is not
@@ -732,7 +1111,7 @@ export interface UpdateTrace {
    * which operations were removed, in reverse order (as if each was undone).
    * These operations will have already been removed from the journal.
    */
-  readonly voids: AuditOperation[]
+  readonly voids: AuditOperation[];
 }
 
 /**
@@ -793,3 +1172,44 @@ export interface MeldTransportSecurity {
 export const noTransportSecurity: MeldTransportSecurity = {
   wire: (data: Buffer) => data
 };
+
+// Errors are used unchanged from m-ld-spec
+export { MeldErrorStatus };
+
+/**
+ * Utility wrapper for exceptions thrown by an engine or its extensions.
+ * @category API
+ */
+export class MeldError extends Error {
+  readonly status: MeldErrorStatus;
+
+  constructor(status: keyof typeof MeldErrorStatus | MeldErrorStatus, detail?: any) {
+    super((typeof status == 'string' ? status :
+      MeldErrorStatus[status]) + (detail != null ? `: ${detail}` : ''));
+    this.status = typeof status == 'string' ? MeldErrorStatus[status] : status;
+  }
+
+  static from(err: any): MeldError {
+    if (err == null)
+      return new MeldError('No error');
+    else if (err instanceof MeldError)
+      return err;
+    else if (typeof err.status == 'number' && err.status in MeldErrorStatus)
+      return new MeldError(err.status, err.message);
+    else
+      return new MeldError('Unknown error', err.message);
+  }
+}
+
+/**
+ * @category API
+ */
+export type UUID = string;
+
+/**
+ * Delete-insert of quads, augmented with m-ld-specific details.
+ * @todo indirected datatype values
+ * @todo shared datatype updates
+ * @category API
+ */
+export type MeldQuadDeleteInsert = BaseDeleteInsert & { agree?: unknown };

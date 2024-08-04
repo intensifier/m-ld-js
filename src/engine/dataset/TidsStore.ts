@@ -1,12 +1,17 @@
-import { Triple, tripleIndexKey, TripleMap } from '../quads';
+import { Triple, tripleFromKey, tripleIndexKey, tripleKey, TripleMap } from '../quads';
 import { MutableOperation, Operation } from '../ops';
-import { UUID } from '../MeldEncoding';
 import { IndexMatch, IndexSet } from '../indices';
-import { Kvps, KvpStore } from './index';
-import { MsgPack } from '../util';
+import { Kvps, TripleKeyStore } from './index';
+import * as MsgPack from '../msgPack';
+import { map, takeWhile } from 'rxjs/operators';
+import { Consumable } from 'rx-flowable';
+import { UUID } from '../../api';
+
+/** Prefix for TID keys */
+const KEY_PRE = '_qs:ttd:';
 
 /**
- * Persists mappings from triples to transaction IDs (TIDs) in a {@link KvpStore}.
+ * Persists mappings from triples to transaction IDs (TIDs) in a {@link TripleKeyStore}.
  * Existing mappings are cached, so it's important not to have two of these working against
  * the same underlying store.
  */
@@ -14,7 +19,7 @@ export class TidsStore {
   private cache: TripleMap<UUID[]> = new TripleMap();
 
   constructor(
-    private store: KvpStore) {
+    private store: TripleKeyStore) {
   }
 
   /**
@@ -24,7 +29,9 @@ export class TidsStore {
    *   triples; otherwise, triples with no TIDs will be omitted.
    */
   async findTriplesTids(
-    triples: Iterable<Triple>, includeEmpty?: 'includeEmpty'): Promise<TripleMap<UUID[]>> {
+    triples: Iterable<Triple>,
+    includeEmpty?: 'includeEmpty'
+  ): Promise<TripleMap<UUID[]>> {
     const triplesTids = new TripleMap<UUID[]>();
     await Promise.all([...triples].map(async triple => {
       const tripleTids = await this.findTripleTids(triple);
@@ -41,12 +48,32 @@ export class TidsStore {
    */
   async findTripleTids(triple: Triple): Promise<UUID[]> {
     let tids = this.cache.get(triple);
-    if (tids == null) { // Not found in cache
-      const encoded = await this.store.get(tripleTidsKey(triple));
-      tids = encoded != null ? MsgPack.decode(encoded) as UUID[] : [];
-      this.cache.set(triple, tids);
-    }
+    if (tids == null) // Not found in cache
+      tids = this.cacheTids(triple, await this.store.get(this.tripleTidsKey(triple)));
     return tids;
+  }
+
+  /**
+   * Retrieves all triple objects which match the given subject and predicate, for
+   * which TIDs exist in this store.
+   *
+   * @param subject
+   * @param predicate
+   */
+  findTriples(
+    subject: Triple['subject'],
+    predicate: Triple['predicate']
+  ): Consumable<Triple['object']> {
+    const gt = this.tripleTidsKey(this.store.rdf.quad(
+      subject, predicate, this.store.rdf.variable('any')));
+    return this.store.read({ gt }).pipe(
+      takeWhile(({ value: [key] }) => key.startsWith(gt)),
+      map(({ value: [key, encodedTids], next }) => {
+        const triple = tripleFromKey(
+          key.slice(KEY_PRE.length), this.store.rdf, this.store.prefixes);
+        this.cacheTids(triple, encodedTids);
+        return { value: triple.object, next };
+      }));
   }
 
   /**
@@ -60,16 +87,22 @@ export class TidsStore {
     return batch => {
       for (let [triple, tids] of affected) {
         if (tids.size)
-          batch.put(tripleTidsKey(triple), MsgPack.encode([...tids]));
+          batch.put(this.tripleTidsKey(triple), MsgPack.encode([...tids]));
         else
-          batch.del(tripleTidsKey(triple));
+          batch.del(this.tripleTidsKey(triple));
       }
     };
   }
-}
 
-function tripleTidsKey(triple: Triple) {
-  return `_qs:ttd:${tripleIndexKey(triple)}`;
+  tripleTidsKey(triple: Triple) {
+    return `${KEY_PRE}${tripleKey(triple, this.store.prefixes)}`;
+  }
+
+  private cacheTids(triple: Triple, encodedTids: Buffer | undefined) {
+    const tids = encodedTids != null ? MsgPack.decode(encodedTids) as UUID[] : [];
+    this.cache.set(triple, tids);
+    return tids;
+  }
 }
 
 export class PatchTids extends MutableOperation<[Triple, UUID]> {

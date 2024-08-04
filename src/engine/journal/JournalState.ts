@@ -2,10 +2,8 @@ import { GlobalClock, GlobalClockJson, TreeClock, TreeClockJson } from '../clock
 import { Kvps } from '../dataset';
 import { JournalEntry } from './JournalEntry';
 import { EncodedOperation } from '../index';
-import { Journal, tickKey } from '.';
-import { MeldOperation } from '../MeldOperation';
-import { TripleMap } from '../quads';
-import { UUID } from '../MeldEncoding';
+import { Journal, TICK_KEY_GEN } from '.';
+import { EntryReversion, MeldOperation } from '../MeldOperation';
 import { Attribution } from '../../api';
 
 interface JournalStateJson {
@@ -34,14 +32,21 @@ interface JournalStateJson {
   agreed: TreeClockJson;
 }
 
+/**
+ * Marks a remote identity as blocked in the GWC. Note the use of characters
+ * that do not appear in Base64 alphabet.
+ */
+const BLOCKED = '!blocked!';
+
 export interface EntryBuilder {
   next(
     operation: MeldOperation,
-    deleted: TripleMap<UUID[]>,
+    reversion: EntryReversion,
     localTime: TreeClock,
     attribution: Attribution | null
   ): this;
   void(entry: JournalEntry): this;
+  block(remoteTime: TreeClock): this;
   deleteEntries: JournalEntry[];
   appendEntries: JournalEntry[];
   state: JournalState;
@@ -92,31 +97,37 @@ export class JournalState {
       appendEntries: JournalEntry[] = [];
 
       constructor(
-        public state: JournalState) {
-      }
+        public state: JournalState
+      ) {}
 
       next(
         operation: MeldOperation,
-        deleted: TripleMap<UUID[]>,
+        reversion: EntryReversion,
         localTime: TreeClock,
         attribution: Attribution | null
       ) {
         const prevTicks = this.state.gwc.getTicks(operation.time);
         const prevTid = this.state.gwc.tid(operation.time);
+        if (prevTid === BLOCKED)
+          throw new RangeError('Trying to process operation from a blocked remote!');
         this.appendEntries.push(JournalEntry.fromOperation(
           this.state.journal,
-          tickKey(localTime.ticks),
+          TICK_KEY_GEN.tickKey(localTime.ticks),
           [prevTicks, prevTid],
           operation,
-          deleted,
-          attribution));
-        this.state = this.state.withTime(localTime,
-          this.state.gwc.set(operation.time), operation.agreed != null ?
-            operation.time.ticked(operation.agreed.tick) : undefined);
+          reversion,
+          attribution
+        ));
+        this.state = this.state.withTime(
+          localTime,
+          this.state.gwc.set(operation.time),
+          operation.agreed != null ?
+            operation.time.ticked(operation.agreed.tick) : undefined
+        );
         return this;
       }
 
-      void(entry: JournalEntry): this {
+      void(entry: JournalEntry) {
         if (entry.operation.agreed != null)
           throw new RangeError('Cannot void an agreement');
         // The entry's tick is now internal to its process, so the GWC must be
@@ -127,6 +138,12 @@ export class JournalState {
         this.state = this.state.withTime(
           this.state.time.ticked(prevTime),
           this.state.gwc.set(prevTime, prevTid));
+        return this;
+      }
+
+      block(remoteTime: TreeClock): this {
+        this.state = this.state.withTime(
+          this.state.time, this.state.gwc.set(remoteTime, BLOCKED));
         return this;
       }
 
@@ -142,6 +159,10 @@ export class JournalState {
     })(this);
   }
 
+  isBlocked(remoteTime: TreeClock) {
+    return this.gwc.tid(remoteTime) === BLOCKED;
+  }
+
   /**
    * Uses the journal to calculate the applicable operation based on the
    * incoming operation:
@@ -154,7 +175,7 @@ export class JournalState {
    * @returns `op` if no changes are required, or an operation representing the
    * un-applied suffix, or `null` if `op` should be ignored.
    */
-  applicableOperation(op: MeldOperation): Promise<MeldOperation | null> {
+  applicableOperation(op: MeldOperation): Promise<MeldOperation> {
     return this.journal.withLockedHistory(async () => {
       // Cut away stale parts of an incoming fused operation.
       // Optimisation: no need to cut if incoming is not fused.
@@ -166,8 +187,7 @@ export class JournalState {
         if (seenOp != null)
           op = await seenOp.cutSeen(op);
       }
-      // If anything in the op pre-dates the last agreement, ignore it
-      return { return: op.time.anyLt(this.agreed) ? null : op };
+      return { return: op };
     });
   }
 
@@ -175,8 +195,10 @@ export class JournalState {
     return this.journal.withLockedHistory(async () => {
       // For each latest op, emit a fusion of all contiguous ops up to it
       const ops = await Promise.all([...this.gwc.tids()].map(async tid => {
-        // Every TID in the GWC except genesis should be represented
-        if (tid !== TreeClock.GENESIS.hash) {
+        // Every TID in the GWC except genesis and blocked should be represented.
+        // Latest operation history for blocked clones is not necessary because
+        // no further operations will be accepted anyway.
+        if (tid !== TreeClock.GENESIS.hash && tid !== BLOCKED) {
           const op = await this.journal.operation(tid, 'require');
           return op.fusedPast();
         }

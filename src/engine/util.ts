@@ -1,20 +1,11 @@
 import {
-  AsyncSubject, BehaviorSubject, concat, defaultIfEmpty, EMPTY, firstValueFrom, from, NEVER,
+  BehaviorSubject, concat, connect, defaultIfEmpty, EMPTY, endWith, firstValueFrom, from, NEVER,
   Observable, ObservableInput, ObservedValueOf, Observer, onErrorResumeNext, OperatorFunction,
   Subject, Subscription, throwError
 } from 'rxjs';
-import { mergeMap, publish, switchAll, tap } from 'rxjs/operators';
-import { getLogger, getLoggers, LogLevelDesc } from 'loglevel';
-import * as performance from 'marky';
-import { decode as rawDecode, encode as rawEncode } from '@ably/msgpack-js';
-import { EventEmitter } from 'events';
+import { ignoreElements, mergeMap, switchAll, takeUntil } from 'rxjs/operators';
 
 export const isArray = Array.isArray;
-
-export namespace MsgPack {
-  export const encode = (value: any) => Buffer.from(rawEncode(value).buffer);
-  export const decode = (buffer: Uint8Array) => rawDecode(Buffer.from(buffer));
-}
 
 export function flatten<T>(bumpy: T[][]): T[] {
   return ([] as T[]).concat(...bumpy);
@@ -27,7 +18,9 @@ export function flatten<T>(bumpy: T[][]): T[] {
  * @param pump the map function that inflates the input to an observable output
  */
 export function inflate<T extends ObservableInput<any>, O extends ObservableInput<any>>(
-  input: O, pump: (p: ObservedValueOf<O>) => T): Observable<ObservedValueOf<T>> {
+  input: O,
+  pump: (p: ObservedValueOf<O>) => T
+): Observable<ObservedValueOf<T>> {
   return from(input).pipe(mergeMap(pump));
 }
 
@@ -55,60 +48,17 @@ export function completed(observable: Observable<unknown>): Promise<void> {
     observable.subscribe({ complete: resolve, error: reject }));
 }
 
-export class Future<T = void> implements PromiseLike<T> {
-  private readonly subject = new AsyncSubject<T>();
-  private _pending = true;
-  private _promise: Promise<T>;
-
-  constructor(value?: T) {
-    this._promise = firstValueFrom(this.subject);
-    this._promise.catch(() => {}); // Suppress UnhandledPromiseRejection
-    if (value !== undefined)
-      this.resolve(value);
-  }
-
-  get pending() {
-    return this._pending;
-  }
-
-  get settle() {
-    return [this.resolve, this.reject];
-  }
-
-  resolve = (value: T) => {
-    this._pending = false;
-    this.subject.next(value);
-    this.subject.complete();
-  };
-
-  reject = (err: any) => {
-    this._pending = false;
-    this.subject.error(err);
-  };
-
-  then: Promise<T>['then'] = (onfulfilled, onrejected) => {
-    return this._promise.then(onfulfilled, onrejected);
-  };
+export function throwOnComplete(
+  observable: Observable<unknown>,
+  errorFactory: () => any
+): Observable<never> {
+  return concat(observable.pipe(ignoreElements()), throwError(errorFactory));
 }
 
-export function tapLast<T>(done: Future<T | undefined>): OperatorFunction<T, T> {
-  let last: T | undefined;
-  return tap({
-    next: item => {
-      last = item;
-    },
-    complete: () => done.resolve(last),
-    error: done.reject
-  });
+export function takeUntilComplete<T>(other: Observable<unknown>): OperatorFunction<T, T> {
+  return takeUntil(other.pipe(ignoreElements(), endWith(0)));
 }
 
-/**
- * CAUTION: the future will not be resolved if the subscriber unsubscribes.
- * To capture unsubscription, use the RxJS `finalize` operator.
- */
-export function tapComplete<T>(done: Future): OperatorFunction<T, T> {
-  return tap({ complete: () => done.resolve(), error: done.reject });
-}
 /**
  * Delays notifications from a source until a signal is received from a notifier.
  * @see https://ncjamieson.com/how-to-write-delayuntil/
@@ -116,30 +66,35 @@ export function tapComplete<T>(done: Future): OperatorFunction<T, T> {
 export function delayUntil<T>(notifier: ObservableInput<unknown>): OperatorFunction<T, T> {
   return source =>
     source.pipe(
-      publish(published => {
+      connect(published => {
         const delayed = new Observable<T>(subscriber => {
           let buffering = true;
           const buffer: T[] = [];
           const subscription = new Subscription();
           subscription.add(
-            from(notifier).subscribe(
-              () => {
+            from(notifier).subscribe({
+              next() {
                 buffer.forEach(value => subscriber.next(value));
                 subscriber.complete();
               },
-              error => subscriber.error(error),
-              () => {
+              error(err) {
+                subscriber.error(err);
+              },
+              complete() {
                 buffering = false;
                 buffer.length = 0;
               }
-            )
-          );
+            }));
           subscription.add(
-            published.subscribe(
-              value => buffering && buffer.push(value),
-              error => subscriber.error(error)
-            )
-          );
+            published.subscribe({
+              next(value) {
+                if (buffering)
+                  buffer.push(value);
+              },
+              error(err) {
+                subscriber.error(err);
+              }
+            }));
           subscription.add(() => {
             buffer.length = 0;
           });
@@ -197,71 +152,14 @@ export class PauseableSource<T> extends Observable<T> implements Observer<T> {
   }
 }
 
-export function getIdLogger(ctor: Function, id: string, logLevel: LogLevelDesc = 'info') {
-  const loggerName = `${ctor.name}.${id}`;
-  const loggerInitialised = loggerName in getLoggers();
-  const log = getLogger(loggerName);
-  if (!loggerInitialised) {
-    const originalFactory = log.methodFactory;
-    log.methodFactory = (methodName, logLevel, loggerName) => {
-      const method = originalFactory(methodName, logLevel, loggerName);
-      return (...msg: any[]) => method.apply(undefined, [new Date().toISOString(), id, ctor.name].concat(msg));
-    };
-  }
-  log.setLevel(logLevel);
-  return log;
-}
-
-type SyncMethod<T> = (this: T, ...args: any[]) => any;
-type AsyncMethod<T> = (this: T, ...args: any[]) => Promise<any>;
-type RxMethod<T> = (this: T, ...args: any[]) => Observable<any>;
-
-export function check<T>(assertion: (t: T) => boolean, otherwise: () => Error) {
-  return {
-    sync: checkWith<T, SyncMethod<T>>(assertion, otherwise, err => { throw err; }),
-    async: checkWith<T, AsyncMethod<T>>(assertion, otherwise, Promise.reject.bind(Promise)),
-    rx: checkWith<T, RxMethod<T>>(assertion, otherwise, throwError)
-  };
-}
-
-export function checkWith<T, M extends (this: T, ...args: any[]) => any>(
-  assertion: (t: T) => boolean, otherwise: () => Error, reject: (err: any) => any) {
-  return function (_t: any, _p: string, descriptor: TypedPropertyDescriptor<M>) {
-    const method = <M>descriptor.value;
-    descriptor.value = <M>function (this: T, ...args: any[]) {
-      if (assertion(this))
-        return method.apply(this, args);
-      else
-        return reject(otherwise());
-    };
-  };
-}
-
-export class Stopwatch {
-  readonly name: string;
-  lap: Stopwatch;
-  laps: { [name: string]: Stopwatch } = {};
-  static timingEvents = new EventEmitter();
-
-  constructor(
-    scope: string, name: string) {
-    performance.mark(this.name = `${scope}-${name}`);
-    this.lap = this;
-  }
-
-  next(name: string): Stopwatch {
-    this.lap.stop();
-    this.lap = this.laps[name] = new Stopwatch(this.name, name);
-    return this;
-  }
-
-  stop(): PerformanceEntry {
-    if (this.lap !== this)
-      this.lap.stop();
-    const event = performance.stop(this.name);
-    Stopwatch.timingEvents.emit('timing', event);
-    return event;
-  }
+/**
+ * @param term the object to clone with its prototype chain
+ * @param ownProperties own properties to set/override. Note, using this with an
+ * incomplete set of properties for the semantics of the object subverts the
+ * type system.
+ */
+export function clone<T extends object>(term: T, ownProperties: object = term) {
+  return Object.assign(Object.create(Object.getPrototypeOf(term)), ownProperties);
 }
 
 export function poisson(mean: number) {
@@ -298,9 +196,32 @@ export function binaryFold<T, R>(
   }, null);
 }
 
-export function mapObject(
-  o: {}, fn: (k: string, v: any) => { [key: string]: any } | undefined): { [key: string]: any } {
+export function mapObject<V1, V2>(
+  o: Record<string, V1>,
+  fn: (k: string, v: V1) => Record<string, V2> | undefined
+): { [key: string]: V2 } {
   return Object.assign({}, ...Object.entries(o).map(([k, v]) => fn(k, v)));
+}
+
+export function *mapIter<T, R>(it: Iterable<T>, fn: (v: T) => R): Iterable<R> {
+  for (let v of it)
+    yield(fn(v));
+}
+
+export function *concatIter<T>(...its: Iterable<T>[]) {
+  for (let it of its)
+    yield *it;
+}
+
+export function iterable<T, This>(
+  genIt: (this: This) => Iterator<T> | undefined,
+  callThis?: This
+): Iterable<T> {
+  return {
+    [Symbol.iterator]() {
+      return genIt.call(callThis) ?? [][Symbol.iterator]();
+    }
+  };
 }
 
 export function *deepValues(
@@ -338,3 +259,26 @@ export function trimTail<T>(arr: T[]): T[] {
 
 export const isNaturalNumber = (n: any) =>
   typeof n == 'number' && Number.isSafeInteger(n) && n >= 0;
+
+export class IndexKeyGenerator {
+  pad: string;
+
+  constructor(
+    public radix = 36,
+    public length = 8
+  ) {
+    this.pad = '0'.repeat(length);
+  }
+
+  key(index: number) {
+    return this.pad.concat(index.toString(this.radix)).slice(-this.length);
+  }
+
+  index(key: string) {
+    return Number.parseInt(key, this.radix);
+  }
+}
+
+export function compare<T>(v1: T, v2: T) {
+  return v1 === v2 ? 0 : v1 > v2 ? 1 : -1;
+}

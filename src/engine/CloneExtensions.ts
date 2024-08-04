@@ -1,31 +1,41 @@
 import {
-  GraphSubject, MeldConstraint, MeldExtensions, MeldPreUpdate, MeldReadState, StateManaged
+  Datatype, GraphSubject, MeldConstraint, MeldExtensions, MeldPlugin, MeldPreUpdate, MeldReadState
 } from '../api';
 import { Context, Subject } from '../jrql-support';
 import { constraintFromConfig } from '../constraints';
-import { DefaultList } from '../constraints/DefaultList';
-import { InitialApp, MeldApp, MeldConfig } from '../config';
-import { M_LD } from '../ns';
-import { getIdLogger } from './util';
+import { DefaultList } from '../lseq/DefaultList';
+import { combinePlugins, InitialApp, MeldApp, MeldConfig } from '../config';
+import { M_LD, RDF, XS } from '../ns';
 import { Logger } from 'loglevel';
-import { OrmDomain, OrmState, OrmSubject } from '../orm/index';
-import { ExtensionSubject } from '../orm';
+import { OrmDomain, OrmSubject, OrmUpdating } from '../orm';
+import { getIdLogger } from './logging';
+import { ExtensionSubjectInstance, SingletonExtensionSubject } from '../orm/ExtensionSubject';
+import { StateManaged } from './index';
+import { byteArrayDatatype, jsonDatatype } from '../datatype';
+import { Iri } from '@m-ld/jsonld';
+import { JsonldContext } from './jsonld';
 
 /**
  * Top-level aggregation of extensions. Created from the configuration and
  * runtime app initially; thereafter tracks extensions declared in the domain
  * data and installs them as required.
  */
-export class CloneExtensions extends OrmDomain implements StateManaged<MeldExtensions> {
+export class CloneExtensions extends OrmDomain implements StateManaged, MeldExtensions {
   static async initial(
     config: MeldConfig,
     app: InitialApp,
     context: Context
   ) {
+    const activeCtx = await JsonldContext.active(context);
+    app.setExtensionContext?.({ config, app, context: activeCtx });
+    const { indirectedData, agreementConditions, transportSecurity } = app;
+    const constraints = await this.constraintsFromConfig(config, app.constraints, context);
     return new CloneExtensions({
-      constraints: await this.constraintsFromConfig(config, app.constraints, context),
-      transportSecurity: app.transportSecurity
-    }, config, app);
+      constraints,
+      indirectedData: indirectedData?.bind(app),
+      agreementConditions,
+      transportSecurity
+    }, config, app, activeCtx);
   }
 
   private static async constraintsFromConfig(
@@ -33,7 +43,7 @@ export class CloneExtensions extends OrmDomain implements StateManaged<MeldExten
     initial: Iterable<MeldConstraint> | undefined,
     context: Context
   ) {
-    // Take the initial constraints if provided
+    // noinspection JSDeprecatedSymbols - initial constraints, if provided
     return ([...initial ?? []]).concat(await Promise.all((config.constraints ?? [])
       .map(item => constraintFromConfig(item, context))));
   }
@@ -41,128 +51,137 @@ export class CloneExtensions extends OrmDomain implements StateManaged<MeldExten
   private readonly log: Logger;
   /** Represents the `@list` of the global `M_LD.extensions` list subject  */
   private readonly extensionSubjects: ManagedExtensionSubject[];
-
-  ready = () => this.upToDate().then(() => {
-    const id = this.config['@id'];
-    return Promise.all(this.extensions()).then(extensions => ({
-      get constraints() {
-        return constraints(extensions, id);
-      },
-      get agreementConditions() {
-        return agreementConditions(extensions);
-      },
-      get transportSecurity() {
-        return transportSecurity(extensions);
-      }
-    }));
-  });
+  private readonly combinedPlugins: MeldExtensions;
+  private readonly _extensions: MeldPlugin[];
+  private _defaultList: DefaultList;
 
   private constructor(
-    private readonly initial: MeldExtensions,
-    private readonly config: MeldConfig,
-    private readonly app: MeldApp
+    private readonly initial: MeldPlugin,
+    config: MeldConfig,
+    app: MeldApp,
+    readonly context: JsonldContext
   ) {
-    super();
+    super({ config, app, context });
     this.log = getIdLogger(this.constructor, config['@id'], config.logLevel);
     this.extensionSubjects = [];
+    this.scope.on('deleted', deleted => {
+      if (deleted.src['@id'] === M_LD.extensions)
+        // The whole extensions object has been deleted!
+        this.extensionSubjects.length = 0;
+    });
+    this.scope.on('cacheMiss', async (insert, orm) => {
+      // This catches the case there were no extensions in the initialise
+      if (insert['@id'] === M_LD.extensions)
+        // OrmSubject cannot cope with list update syntax, so load from state
+        await this.loadAllExtensions(orm);
+    });
+    this.combinedPlugins = combinePlugins(this._extensions = [initial]);
   }
 
-  async initialise(state: MeldReadState) {
-    await this.updating(state, async orm => {
+  /**
+   * Get the current or next available value, ready for use (or a rejection,
+   * e.g. if the clone is shutting down). This might be called while one of the
+   * update methods is in-progress.
+   */
+  ready = () => this.upToDate().then(() => this);
+
+  onInitial(state: MeldReadState) {
+    return this.updating(state, async orm => {
       // Load the top-level extensions subject into our cache
-      await this.loadExtensions(orm);
-      await orm.update();
-      // Now initialise all extensions
-      for (let extSubject of this.extensionSubjects)
-        await extSubject.initialiseOrUpdate(state);
+      await this.loadAllExtensions(orm);
+      await this.updateExtensions();
     });
   }
 
-  async onUpdate(update: MeldPreUpdate, state: MeldReadState) {
-    await this.updating(state, async orm => {
+  onUpdate(update: MeldPreUpdate, state: MeldReadState) {
+    return this.updating(state, async orm => {
       // This will update the extension list and all the extension subjects
-      await orm.update(update, deleted => {
-        if (deleted.src['@id'] === M_LD.extensions)
-          // The whole extensions object has been deleted!
-          this.extensionSubjects.length = 0;
-      }, async insert => {
-        // This catches the case there were no extensions in the initialise
-        if (insert['@id'] === M_LD.extensions)
-          // OrmSubject cannot cope with list update syntax, so load from state
-          await this.loadExtensions(orm);
-      });
-      // Update or initialise the extensions themselves
-      for (let extSubject of this.extensionSubjects)
-        await extSubject.initialiseOrUpdate(state, update);
+      await orm.updated(update);
+      await this.updateExtensions();
     });
   }
 
-  private loadExtensions(orm: OrmState) {
-    return orm.get({ '@id': M_LD.extensions }, src => {
-      const { config, app, extensionSubjects } = this;
+  get constraints() {
+    return withDefaults(this.combinedPlugins.constraints, {
+      is: constraint => constraint instanceof DefaultList, get: () =>
+        this._defaultList ??= new DefaultList(this.config['@id'])
+    });
+  }
+
+  indirectedData = (datatype: Iri, property: Iri): Datatype | undefined => {
+    const dt = this.combinedPlugins.indirectedData?.(datatype, property);
+    if (dt == null) {
+      if (datatype === RDF.JSON) return jsonDatatype;
+      if (datatype === XS.base64Binary) return byteArrayDatatype;
+    }
+    return dt;
+  };
+
+  get agreementConditions() {
+    return this.combinedPlugins.agreementConditions;
+  }
+
+  get transportSecurity() {
+    return this.combinedPlugins.transportSecurity;
+  }
+
+  private async updateExtensions() {
+    // Leave the 'initial' extensions in place
+    this._extensions.splice(1, this._extensions.length,
+      ...(await Promise.all(this.iterateExtensions())));
+  }
+
+  private async loadAllExtensions(orm: OrmUpdating) {
+    await orm.get({ '@id': M_LD.extensions }, src => {
+      const { extensionSubjects } = this;
       return new class extends OrmSubject {
         constructor(src: GraphSubject) {
           super(src);
-          this.initList(src, Subject, extensionSubjects,
-            i => extensionSubjects[i].src,
-            async (i, v: GraphSubject) => extensionSubjects[i] = await orm.get(v,
-              src => new ManagedExtensionSubject(src, { config, app })));
+          this.initSrcList(src, Subject, extensionSubjects, {
+            get: i => extensionSubjects[i].src,
+            set: async (i, v: GraphSubject) => extensionSubjects[i] = await orm.get(v,
+              src => ManagedExtensionSubject.create(src, orm))
+          });
         }
       }(src);
     });
+    await orm.updated();
   }
 
-  private *extensions() {
-    yield this.initial;
-    for (let extSubject of this.extensionSubjects)
-      if (extSubject.instance != null)
-        yield extSubject.instance.ready();
-  }
-}
-
-class ManagedExtensionSubject extends ExtensionSubject<StateManaged<MeldExtensions>> {
-  private initialised = false;
-
-  protected setUpdated(result: unknown | Promise<unknown>) {
-    this.initialised = false;
-    super.setUpdated(result);
-  }
-
-  async initialiseOrUpdate(state: MeldReadState, update?: MeldPreUpdate) {
-    if (!this.initialised) {
-      await this.instance.initialise?.(state);
-      this.initialised = true;
-    } else if (update != null) {
-      await this.instance.onUpdate?.(update, state);
-    } else {
-      throw new Error('No update available');
+  private *iterateExtensions() {
+    for (let extSubject of this.extensionSubjects) {
+      yield extSubject.singleton.catch(e => {
+        this.log.warn('Failed to load extension', extSubject.className, e);
+        return {}; // Empty extensions
+      });
     }
   }
 }
 
-function *constraints(
-  extensions: Iterable<MeldExtensions>,
-  id: string
+class ManagedExtensionSubject
+  extends SingletonExtensionSubject<MeldPlugin & ExtensionSubjectInstance> {
+  static async create(src: GraphSubject, orm: OrmUpdating) {
+    return new ManagedExtensionSubject(src, orm).ready;
+  }
+
+  protected async newInstance(src: GraphSubject, orm: OrmUpdating) {
+    const extensions = await super.newInstance(src, orm);
+    extensions.setExtensionContext?.(orm.domain);
+    return extensions;
+  }
+}
+
+function *withDefaults<T>(
+  extensions: Iterable<T> | undefined,
+  ...defaults: { is: (ext: T) => boolean, get: () => T }[]
 ) {
-  let foundDefaultList = false;
-  for (let ext of extensions) {
-    for (let constraint of ext.constraints ?? []) {
-      yield constraint;
-      foundDefaultList ||= constraint instanceof DefaultList;
-    }
+  const foundDefault = Array<boolean>(defaults.length);
+  for (let ext of extensions ?? []) {
+    yield ext;
+    defaults.forEach((d, i) => foundDefault[i] ||= d.is(ext));
   }
-  // Ensure the default list constraint exists
-  if (!foundDefaultList)
-    yield new DefaultList(id);
-}
-
-function *agreementConditions(extensions: Iterable<MeldExtensions>) {
-  for (let ext of extensions)
-    yield *ext.agreementConditions ?? [];
-}
-
-function transportSecurity(extensions: Awaited<MeldExtensions>[]) {
-  for (let ext of extensions)
-    if (ext.transportSecurity != null)
-      return ext.transportSecurity;
+  // Ensure the defaults exist
+  for (let i = 0; i < defaults.length; i++)
+    if (!foundDefault[i])
+      yield defaults[i].get();
 }

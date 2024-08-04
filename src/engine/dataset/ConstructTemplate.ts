@@ -1,25 +1,38 @@
 import { Iri } from '@m-ld/jsonld';
-import { Binding } from 'quadstore';
 import { anyName, blank, GraphSubject } from '../../api';
 import {
-  isList, isPropertyObject, isSet, isSubjectObject, Subject, SubjectProperty, SubjectPropertyObject,
-  Value, Variable
+  ConstrainedVariable,
+  Group,
+  isInlineConstraint,
+  isList,
+  isPropertyObject,
+  isSet,
+  isSubjectObject,
+  Subject,
+  SubjectProperty,
+  SubjectPropertyObject,
+  Value,
+  Variable
 } from '../../jrql-support';
 import { matchVar } from '../../ns/json-rql';
 import { array } from '../../util';
-import { addPropertyObject, listItems } from '../jrql-util';
-import { ActiveContext, compactIri } from '../jsonld';
+import { addPropertyObject, JrqlMode, listItems } from '../jrql-util';
+import { JsonldContext } from '../jsonld';
 import { jrqlProperty, jrqlValue } from '../SubjectGraph';
+import { Binding } from '../../rdfjs-support';
 
 export class ConstructTemplate {
-  private templates: SubjectTemplate[];
+  private readonly templates: SubjectTemplate[];
 
-  constructor(construct: Subject | Subject[], ctx: ActiveContext) {
+  constructor(construct: Subject | Subject[], ctx: JsonldContext) {
     this.templates = array(construct).map(c => new SubjectTemplate(c, ctx));
   }
 
-  get asPattern(): Subject[] {
-    return this.templates.map(t => t.pattern);
+  get asPattern(): Group {
+    const group: Group = { '@union': [] };
+    for (let template of this.templates)
+      group['@union']!.push(...template.patterns());
+    return group;
   }
 
   // noinspection JSUnusedGlobalSymbols used in JrqlGraph
@@ -31,7 +44,7 @@ export class ConstructTemplate {
 
   *results(): Iterable<GraphSubject> {
     for (let template of this.templates)
-      yield* template.results.values();
+      yield *template.results.values();
   }
 }
 
@@ -46,11 +59,11 @@ class SubjectTemplate {
   private templateId?: Iri;
   private variableId?: Variable;
   private variableProps: [SubjectProperty, Variable][] = [];
-  private variableValues: [SubjectProperty, Variable][] = [];
+  private variableValues: [SubjectProperty, Variable | ConstrainedVariable][] = [];
   private literalValues: [SubjectProperty, Value][] = [];
   private nestedSubjects: [SubjectProperty, SubjectTemplate][] = [];
 
-  constructor(construct: Subject, readonly ctx: ActiveContext) {
+  constructor(construct: Subject, readonly ctx: JsonldContext) {
     // Discover or create the subject identity variable
     if (construct['@id'] != null)
       withNamedVar(matchVar(construct['@id']),
@@ -58,10 +71,10 @@ class SubjectTemplate {
         () => this.templateId = construct['@id']);
     // Discover List variables
     if (isList(construct))
-      for (let [index, item] of listItems(construct['@list'], 'match'))
+      for (let [index, item] of listItems(construct['@list'], JrqlMode.match))
         withNamedVar(index, // Index may be a var name
           (variable, name) => this.addProperty(['@list', variable], name, item),
-          index => this.addProperty(['@list', ...index], null, item))
+          index => this.addProperty(['@list', ...index], null, item));
     // Discover other property variables
     for (let key in construct) {
       const value = construct[key];
@@ -71,21 +84,21 @@ class SubjectTemplate {
           () => this.addProperty(key, null, value));
     }
   }
-
   /** Only used if the query does not have a `@where` component. */
-  get pattern(): Subject {
-    const pattern = { '@id': this.variableId ?? this.templateId };
+  *patterns(): Generator<Subject> {
+    const id = this.variableId ?? this.templateId;
     for (let [property, value] of this.literalValues)
-      addPropertyObject(pattern, property, value);
+      yield addPropertyObject({ '@id': id }, property, value);
     for (let [property, variable] of this.variableValues)
-      addPropertyObject(pattern, property, variable);
+      yield addPropertyObject({ '@id': id }, property, variable);
     for (let [property, template] of this.nestedSubjects)
-      addPropertyObject(pattern, property, template.pattern);
-    return pattern;
+      for (let pattern of template.patterns())
+        yield addPropertyObject({ '@id': id }, property, pattern);
   }
 
   private addProperty(property: SubjectProperty,
-    propVarName: string | null, object: SubjectPropertyObject) {
+    propVarName: string | null, object: SubjectPropertyObject
+  ) {
     // Register a property variable if present
     if (propVarName != null)
       this.variableProps.push([property, `?${propVarName}`]);
@@ -100,6 +113,9 @@ class SubjectTemplate {
     } else if (isSet(object)) {
       // TODO: this breaks the construct contract by eliding @set
       this.addObject(property, object['@set']);
+    } else if (isInlineConstraint(object)) {
+      withNamedVar('@value' in object ? object['@value'] : '',
+          variable => this.variableValues.push([property, { '@value': variable, ...object }]));
     } else if (isSubjectObject(object)) {
       // Register a nested subject
       const nested = new SubjectTemplate(object, this.ctx);
@@ -124,7 +140,7 @@ class SubjectTemplate {
      * - No template ID: all solutions go in one result with blank ID
      */
     const sid = this.variableId != null && this.variableId in solution ?
-      compactIri(solution[this.variableId].value, this.ctx) : undefined;
+      this.ctx.compactIri(solution[this.variableId].value) : undefined;
     // Do we already have a result for the bound Subject ID?
     const isNewResult = !this.results.has(sid);
     const result = this.results.get(sid) ?? this.createResult(sid);
@@ -135,10 +151,12 @@ class SubjectTemplate {
     for (let [property, literal] of this.literalValues)
       populator(property, isNewResult).populateWith(() => literal);
     // 3. Bound values into (substitute) properties
-    for (let [property, variable] of this.variableValues)
+    for (let [property, def] of this.variableValues) {
+      const variable = typeof def == 'object' ? def['@value'] : def;
       if (variable in solution)
         populator(property).populateWith(
           resultProp => jrqlValue(resultProp, solution[variable], this.ctx));
+    }
     // 4. Nested subjects into (substitute) properties
     for (let [property, template] of this.nestedSubjects) {
       const nested = template.addSolution(solution);
@@ -154,10 +172,13 @@ class SubjectTemplate {
   private propertyPopulator(result: Subject, solution: Binding) {
     // Mapping from pattern property to result property
     const resultProps = new Map<SubjectProperty, SubjectProperty>();
-    for (let [patternProp, variable] of this.variableProps)
+    for (let [patternProp, variable] of this.variableProps) {
+      const predicate = solution[variable];
       if (variable in solution)
         // TODO: jrqlProperty will translate any numeric to a list index
-        resultProps.set(patternProp, jrqlProperty(solution[variable].value, this.ctx));
+        // TODO: pass the matched triple object, to allow for matching value objects
+        resultProps.set(patternProp, jrqlProperty(predicate.value, null, this.ctx));
+    }
     return (patternProp: SubjectProperty, includeAll = true) => {
       const substitute = resultProps.get(patternProp);
       let populateWith: (getObject: (resultProp: SubjectProperty) => Value) => void;
@@ -191,7 +212,8 @@ class SubjectTemplate {
 function withNamedVar<T>(
   identifier: T,
   whenIsVar: (variable: Variable, name: string) => void,
-  otherwise?: (target: Exclude<T, string>) => void) {
+  otherwise?: (target: Exclude<T, string>) => void
+) {
   if (typeof identifier == 'string') {
     const varName = identifier || anyName();
     whenIsVar(`?${varName}`, varName);

@@ -1,9 +1,8 @@
 /**
- * [[include:mqtt-remotes.md]]
+ * [[include:ext/mqtt-remotes.md]]
  * @module MqttRemotes
  * @internal
  */
-import { Observable } from 'rxjs';
 import {
   AsyncMqttClient, connect as defaultConnect, IClientOptions, ISubscriptionMap
 } from 'async-mqtt';
@@ -47,6 +46,7 @@ export class MqttRemotes extends PubsubRemotes {
   private readonly replyTopic: MqttTopic<ReplyParams & TopicParams>;
   private readonly presence: MqttPresence;
 
+  /** @type ConstructRemotes */
   constructor(
     config: MeldMqttConfig,
     extensions: () => Promise<MeldExtensions>,
@@ -65,7 +65,8 @@ export class MqttRemotes extends PubsubRemotes {
     this.presence = new MqttPresence(this.mqtt, domain, id, config.logLevel);
 
     // Set up listeners
-    this.presence.on('change', () => this.onPresenceChange());
+    this.presence.on('change', () => this.onPresenceChange(
+      [...this.presence.present(this.controlTopic.address)]));
     this.mqtt.on('message', (topic, payload) => {
       this.operationsTopic.match(topic, params => {
         if (params.clientId !== this.id) // Prevent echo
@@ -125,10 +126,6 @@ export class MqttRemotes extends PubsubRemotes {
     return this.mqtt.publish(
       // Client Id is included to prevent echo
       this.operationsTopic.with({ clientId: this.id }).address, msg, { qos: 1 });
-  }
-
-  protected present(): Observable<string> {
-    return this.presence.present(this.controlTopic.address);
   }
 
   protected async notifier({ channelId, toId }: NotifyParams): Promise<SubPub> {

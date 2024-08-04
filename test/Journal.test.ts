@@ -1,4 +1,4 @@
-import { Journal, JournalEntry } from '../src/engine/journal';
+import { EntryBuilder, Journal, JournalEntry } from '../src/engine/journal';
 import { memStore, MockProcess } from './testClones';
 import { MeldEncoder } from '../src/engine/MeldEncoding';
 import { Dataset } from '../src/engine/dataset';
@@ -8,7 +8,6 @@ import { EmptyError, firstValueFrom, Observer, of, Subject } from 'rxjs';
 import { JournalClerk } from '../src/engine/journal/JournalClerk';
 import { JournalAdmin, JournalCheckPoint, JournalConfig } from '../src';
 import { MeldOperation } from '../src/engine/MeldOperation';
-import { TripleMap } from '../src/engine/quads';
 
 describe('Dataset Journal', () => {
   let store: Dataset;
@@ -17,9 +16,22 @@ describe('Dataset Journal', () => {
 
   beforeEach(async () => {
     store = await memStore();
-    encoder = new MeldEncoder('test.m-ld.org', store.rdf);
+    encoder = new MeldEncoder('test.m-ld.org', store.rdf, () => undefined);
+    await encoder.initialise();
     journal = new Journal(store, encoder);
   });
+
+  function transact<T>(txn: (journaling: EntryBuilder) => EntryBuilder, rtn: T) {
+    return store.transact({
+      prepare: () => ({
+        async kvps(batch) {
+          const state = await journal.state();
+          return txn(state.builder()).commit(batch);
+        },
+        return: rtn
+      })
+    });
+  }
 
   /**
    * Operation content doesn't matter to the journal, so in these tests we just commit no-ops.
@@ -28,24 +40,21 @@ describe('Dataset Journal', () => {
    * @param content tuple of deletes and inserts , defaults to no-op
    * @param agree whether this operation is an agreement
    */
-  function opAt(process: MockProcess, content: [object, object] = [{}, {}], agree?: true) {
+  function opAt(process: MockProcess, content = [{}, {}], agree?: true) {
     const [deletes, inserts] = content;
-    return MeldOperation.fromEncoded(encoder, process.operated(deletes, inserts, agree));
+    return MeldOperation.fromEncoded(encoder, process.operated(deletes, inserts, { agree }));
   }
 
   function addEntry(
-    local: MockProcess, remote?: MockProcess, content: [object, object] = [{}, {}]) {
+    local: MockProcess,
+    remote?: MockProcess,
+    content = [{}, {}]
+  ) {
     const op = opAt(remote ?? local, content);
     const localTime = remote ? local.join(op.time).tick().time : local.time;
-    return store.transact({
-      prepare: () => ({
-        async kvps(batch) {
-          const state = await journal.state();
-          return state.builder().next(op, new TripleMap, localTime, null).commit(batch);
-        },
-        return: op
-      })
-    });
+    return transact(journaling => journaling.next(
+      op, {}, localTime, null
+    ), op);
   }
 
   /** Utility for mixing-in journal clerk testing */
@@ -160,6 +169,18 @@ describe('Dataset Journal', () => {
       expect(state.time.equals(local.time)).toBe(true);
       expect(state.gwc.equals(local.gwc)).toBe(true);
       expect(state.start).toBe(0);
+      expect(state.isBlocked(local.time)).toBe(false);
+    });
+
+    test('blocks a remote', async () => {
+      const remote = local.fork();
+      const op = opAt(remote);
+      await transact(journaling => journaling.block(op.time), null);
+      const state = await journal.state();
+      expect(state.isBlocked(remote.time)).toBe(true);
+      expect(state.isBlocked(local.time)).toBe(false);
+      // Forked remote is also blocked
+      expect(state.isBlocked(remote.fork().time)).toBe(true);
     });
 
     describe('with a local operation', () => {
@@ -189,6 +210,7 @@ describe('Dataset Journal', () => {
         const state = await commitOp.then(() => journal.state());
         expect(state.time.equals(local.time)).toBe(true);
         expect(state.gwc.equals(local.gwc)).toBe(true);
+        expect(state.isBlocked(local.time)).toBe(false);
         expect(state.start).toBe(0);
       });
 
@@ -280,7 +302,7 @@ describe('Dataset Journal', () => {
             kvps: journal.spliceEntries(
               [remoteEntry.index, nextEntry.index],
               [JournalEntry.fromOperation(
-                journal, nextEntry.key, remoteEntry.prev, fused, new TripleMap, null)],
+                journal, nextEntry.key, remoteEntry.prev, fused, {}, null)],
               { appending: false })
           })
         });
@@ -299,7 +321,7 @@ describe('Dataset Journal', () => {
         // fuse r2-r3, so journal says l1 -> r1 -> l2 -> (r2-r3) -> l3 -> r4
         const fusedOp = MeldOperation.fromOperation(encoder, r2o.fusion().next(r3o).commit());
         await journal.spliceEntries([r2.index, r3.index],
-          [JournalEntry.fromOperation(journal, r3.key, r2.prev, fusedOp, new TripleMap, null)],
+          [JournalEntry.fromOperation(journal, r3.key, r2.prev, fusedOp, {}, null)],
           { appending: false });
         // first of causal reduce from r4 should be r1
         const [, from, time] = await r4.operation.fusedPast();
@@ -350,7 +372,7 @@ describe('Dataset Journal', () => {
         const fused = MeldOperation.fromOperation(
           encoder, remoteOp.fusion().next(nextOp1).commit());
         const fusedEntry = JournalEntry.fromOperation(
-          journal, nextEntry1.key, remoteEntry.prev, fused, new TripleMap, null);
+          journal, nextEntry1.key, remoteEntry.prev, fused, {}, null);
         await journal.spliceEntries([remoteEntry.index, nextEntry1.index],
           [fusedEntry], { appending: false });
         const expectedFused = MeldOperation.fromOperation(

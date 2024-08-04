@@ -1,4 +1,4 @@
-const Clone = require('@m-ld/m-ld-spec/compliance/clone');
+const { Clone } = require('@m-ld/m-ld-test');
 
 describe('ACL Statutes and Permissions', () => {
   let aliceClone;
@@ -6,7 +6,7 @@ describe('ACL Statutes and Permissions', () => {
   beforeEach(async () => {
     aliceClone = new Clone({
       '@context': {
-        'mld': 'http://m-ld.org/',
+        'mld': 'http://m-ld.org/#',
         'sh': 'http://www.w3.org/ns/shacl#'
       },
       principal: { '@id': 'https://alice.example/profile#me' }
@@ -16,31 +16,29 @@ describe('ACL Statutes and Permissions', () => {
     await aliceClone.transact({
       '@graph': [{
         // m-ld extensions for statutes and write permissions
-        '@id': 'mld:extensions',
+        '@id': 'http://m-ld.org/extensions',
         '@list': [{
-          '@id': 'http://ext.m-ld.org/constraints/Statutory',
-          '@type': 'http://js.m-ld.org/CommonJSModule',
-          'http://js.m-ld.org/#require': '@m-ld/m-ld/ext/constraints/Statutory',
+          '@id': 'http://ext.m-ld.org/statutes/Statutory',
+          'http://js.m-ld.org/#require': '@m-ld/m-ld/ext/statutes',
           'http://js.m-ld.org/#class': 'Statutory'
         }, {
-          '@id': 'http://ext.m-ld.org/constraints/WritePermitted',
-          '@type': 'http://js.m-ld.org/CommonJSModule',
-          'http://js.m-ld.org/#require': '@m-ld/m-ld/ext/constraints/WritePermitted',
+          '@id': 'http://ext.m-ld.org/security/WritePermitted',
+          'http://js.m-ld.org/#require': '@m-ld/m-ld/ext/security',
           'http://js.m-ld.org/#class': 'WritePermitted'
         }]
       }, {
         // Declare a shape for permissions
         '@id': 'has-permission-shape',
-        'sh:path': { '@id': 'mld:#has-permission' }
+        'sh:path': { '@id': 'mld:has-permission' }
       }, {
         // Permissions are statutory, and require authority
         '@type': 'mld:Statute',
-        'mld:#statutory-shape': { '@id': 'has-permission-shape' },
-        'mld:#sufficient-condition': { '@id': 'mld:#has-authority' }
+        'mld:statutory-shape': { '@id': 'has-permission-shape' },
+        'mld:sufficient-condition': { '@id': 'mld:has-authority' }
       }, {
         // Alice has authority over permissions
         '@id': 'https://alice.example/profile#me',
-        'mld:#has-authority': { '@id': 'has-permission-shape' }
+        'mld:has-authority': { '@id': 'has-permission-shape' }
       }]
     });
   });
@@ -49,9 +47,9 @@ describe('ACL Statutes and Permissions', () => {
     // Now, if we add a permission...
     aliceClone.transact({
       '@id': 'https://alice.example/profile#me',
-      'mld:#has-permission': {
+      'mld:has-permission': {
         '@type': 'mld:WritePermission',
-        'mld:#controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
+        'mld:controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
       }
     });
     // The update should be an agreement
@@ -62,7 +60,7 @@ describe('ACL Statutes and Permissions', () => {
   it('disallows unauthorised agreement', async () => {
     const bobClone = new Clone({
       '@context': {
-        'mld': 'http://m-ld.org/',
+        'mld': 'http://m-ld.org/#',
         'sh': 'http://www.w3.org/ns/shacl#'
       },
       principal: { '@id': 'https://bob.example/profile#me' }
@@ -71,9 +69,9 @@ describe('ACL Statutes and Permissions', () => {
     // Bob tries to give himself permission
     await expectAsync(bobClone.transact({
       '@id': 'https://bob.example/profile#me',
-      'mld:#has-permission': {
+      'mld:has-permission': {
         '@type': 'mld:WritePermission',
-        'mld:#controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
+        'mld:controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
       }
     })).toBeRejectedWithError(/not provable/);
   });
@@ -81,9 +79,9 @@ describe('ACL Statutes and Permissions', () => {
   it('disallows unauthorised change', async () => {
     await aliceClone.transact({
       '@id': 'https://alice.example/profile#me',
-      'mld:#has-permission': {
+      'mld:has-permission': {
         '@type': 'mld:WritePermission',
-        'mld:#controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
+        'mld:controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
       }
     });
     const bobClone = new Clone({ principal: { '@id': 'https://bob.example/profile#me' } });
@@ -98,10 +96,10 @@ describe('ACL Statutes and Permissions', () => {
   it('allows a newly-authorised change', async () => {
     await aliceClone.transact({
       '@id': 'https://alice.example/profile#me',
-      'mld:#has-permission': {
+      'mld:has-permission': {
         '@id': 'invoiceStatePermission',
         '@type': 'mld:WritePermission',
-        'mld:#controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
+        'mld:controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
       }
     });
     const bobClone = new Clone({ principal: { '@id': 'https://bob.example/profile#me' } });
@@ -109,7 +107,7 @@ describe('ACL Statutes and Permissions', () => {
     // Now give Bob permission
     await aliceClone.transact({
       '@id': 'https://bob.example/profile#me',
-      'mld:#has-permission': { '@id': 'invoiceStatePermission' }
+      'mld:has-permission': { '@id': 'invoiceStatePermission' }
     });
     await bobClone.updated('@insert', 'https://bob.example/profile#me');
     // Bob tries to create an invoice with a state
@@ -126,13 +124,13 @@ describe('ACL Statutes and Permissions', () => {
         '@graph': [{
           '@id': 'invoiceStatePermission',
           '@type': 'mld:WritePermission',
-          'mld:#controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
+          'mld:controlled-shape': { 'sh:path': { '@vocab': 'invoice-state' } }
         }, {
           '@id': 'https://alice.example/profile#me',
-          'mld:#has-permission': { '@id': 'invoiceStatePermission' }
+          'mld:has-permission': { '@id': 'invoiceStatePermission' }
         }, {
           '@id': 'https://bob.example/profile#me',
-          'mld:#has-permission': { '@id': 'invoiceStatePermission' }
+          'mld:has-permission': { '@id': 'invoiceStatePermission' }
         }, {
           '@id': 'my-invoice',
           'invoice-state': 'ALICE'
@@ -152,7 +150,7 @@ describe('ACL Statutes and Permissions', () => {
         aliceClone.transact({
           '@delete': {
             '@id': 'https://bob.example/profile#me',
-            'mld:#has-permission': { '@id': 'invoiceStatePermission' }
+            'mld:has-permission': { '@id': 'invoiceStatePermission' }
           }
         }),
         // (Wait for the revocation to get to Bob's clone)
@@ -175,7 +173,7 @@ describe('ACL Statutes and Permissions', () => {
       await aliceClone.transact({
         '@delete': {
           '@id': 'https://bob.example/profile#me',
-          'mld:#has-permission': { '@id': 'invoiceStatePermission' }
+          'mld:has-permission': { '@id': 'invoiceStatePermission' }
         }
       });
       // Claire gets Bob's change

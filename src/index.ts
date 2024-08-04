@@ -5,10 +5,11 @@ import { ApiStateMachine } from './engine/MeldState';
 import { DatasetEngine } from './engine/dataset/DatasetEngine';
 import { DomainContext } from './engine/MeldEncoding';
 import type { InitialApp, MeldConfig } from './config';
-import { Stopwatch } from './engine/util';
 import type { MeldRemotes } from './engine';
 import type { LiveStatus } from '@m-ld/m-ld-spec';
-import type { AbstractLevelDOWN } from 'abstract-leveldown';
+import type { AbstractLevel } from 'abstract-level';
+import { Stopwatch } from './engine/Stopwatch';
+import { SuSetDataset } from './engine/dataset/SuSetDataset';
 
 /**
  * Core API exports. Extension exports can be found in package.json/exports
@@ -25,7 +26,7 @@ export * from './jrql-support';
  * Constructor for a driver for connecting to remote m-ld clones on the domain.
  * @internal
  */
-type ConstructRemotes = new (
+export type ConstructRemotes = new (
   config: MeldConfig,
   extensions: () => Promise<MeldExtensions>
 ) => MeldRemotes;
@@ -44,7 +45,7 @@ type ConstructRemotes = new (
  * @category API
  */
 export async function clone(
-  backend: AbstractLevelDOWN,
+  backend: AbstractLevel<any, any, any>,
   constructRemotes: ConstructRemotes,
   config: MeldConfig,
   app: InitialApp = {}
@@ -55,16 +56,16 @@ export async function clone(
   const sw = new Stopwatch('clone', config['@id']);
 
   sw.next('dependencies');
-  const context = new DomainContext(config['@domain'], config['@context']);
-  const extensions = await CloneExtensions.initial(config, app, context);
+  const extensions = await CloneExtensions.initial(config, app,
+    new DomainContext(config['@domain'], config['@context']));
   const remotes = new constructRemotes(config, extensions.ready);
 
   sw.next('dataset');
   const dataset = await new QuadStoreDataset(
-    backend, context, backendEvents).initialise(sw.lap);
-  const engine = new DatasetEngine({
-    dataset, remotes, extensions, config, app, context
-  });
+    config['@domain'], backend, backendEvents).initialise(sw.lap);
+  const suset = new SuSetDataset(
+    dataset, extensions.context, extensions, app, config);
+  const engine = new DatasetEngine(suset, remotes, config);
 
   sw.next('engine');
   await engine.initialise(sw.lap);
@@ -79,6 +80,10 @@ class DatasetClone extends ApiStateMachine implements MeldClone {
     private readonly dataset: DatasetEngine
   ) {
     super(dataset);
+  }
+
+  get context() {
+    return this.dataset.context;
   }
 
   get status(): LiveStatus {

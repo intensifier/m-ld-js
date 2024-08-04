@@ -1,25 +1,26 @@
-import { PatchQuads } from '../src/engine/dataset';
+import { PatchQuads, QuadStoreDataset } from '../src/engine/dataset';
 import { DataFactory as RdfDataFactory } from 'rdf-data-factory';
 import { Quad } from 'rdf-js';
+import { MemoryLevel } from 'memory-level';
 
 const rdf = new RdfDataFactory();
 
 describe('Patch quads', () => {
   const a = rdf.quad(
-    rdf.namedNode('ns:subject1'),
-    rdf.namedNode('ns:predicate1'),
-    rdf.namedNode('ns:object1'),
-    rdf.defaultGraph()),
+      rdf.namedNode('http://ex.org/subject1'),
+      rdf.namedNode('http://ex.org/predicate1'),
+      rdf.namedNode('http://ex.org/object1'),
+      rdf.defaultGraph()),
     b = rdf.quad(
-      rdf.namedNode('ns:subject2'),
-      rdf.namedNode('ns:predicate1'),
-      rdf.namedNode('ns:object1'),
-      rdf.namedNode('ns:graph1')),
+      rdf.namedNode('http://ex.org/subject2'),
+      rdf.namedNode('http://ex.org/predicate1'),
+      rdf.namedNode('http://ex.org/object1'),
+      rdf.namedNode('http://ex.org/graph1')),
     c = rdf.quad(
-      rdf.namedNode('ns:subject1'),
-      rdf.namedNode('ns:predicate1'),
-      rdf.namedNode('ns:object2'),
-      rdf.namedNode('ns:graph1'));
+      rdf.namedNode('http://ex.org/subject1'),
+      rdf.namedNode('http://ex.org/predicate1'),
+      rdf.namedNode('http://ex.org/object2'),
+      rdf.namedNode('http://ex.org/graph1'));
 
   test('Construct empty', () => {
     const patch = new PatchQuads();
@@ -92,6 +93,18 @@ describe('Patch quads', () => {
     expect([...patch.inserts][0].equals(c)).toBe(true);
   });
 
+  test('Include removes delete and insert redundancy', () => {
+    const patch = new PatchQuads();
+    patch.include({ deletes: [a], inserts: [b] });
+    patch.include({ deletes: [b], inserts: [c] });
+    expect(patch.isEmpty).toBe(false);
+    expect([...patch.deletes].length).toBe(1);
+    expect([...patch.inserts].length).toBe(2);
+    expect([...patch.deletes][0].equals(a)).toBe(true);
+    expect([...patch.inserts][0].equals(b) || [...patch.inserts][0].equals(c)).toBe(true);
+    expect([...patch.inserts][1].equals(b) || [...patch.inserts][1].equals(c)).toBe(true);
+  });
+
   test('Append removes delete then insert redundancy', () => {
     const patch = new PatchQuads();
     patch.append({ deletes: [a/* squash */], inserts: [b] });
@@ -144,5 +157,15 @@ describe('Patch quads', () => {
     expect([...patch.deletes]).toEqual([]);
     expect([...patch.inserts].length).toBe(1);
     expect(patch.isEmpty).toBe(false);
+  });
+});
+
+// Note that the quadstore dataset is heavily tested by e.g.
+// SuSetDataset and MeldClone tests
+describe('Quadstore Dataset', () => {
+  test('generate skolem from base', async () => {
+    const ds = await new QuadStoreDataset('ex.org', new MemoryLevel()).initialise();
+    expect(ds.graph().rdf.skolem!().value).toMatch(
+      /http:\/\/ex\.org\/\.well-known\/genid\/\w+/);
   });
 });

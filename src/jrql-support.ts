@@ -1,11 +1,18 @@
 import * as jrql from 'json-rql';
 import { Iri } from '@m-ld/jsonld';
+import { isArray } from './engine/util';
 
 /**
  * This module defines the sub-types of json-rql supported by JrqlGraph.
  */
 
 // Re-exporting unchanged types
+/**
+ * An IRI (Internationalized Resource Identifier) within an RDF graph is a
+ * Unicode string that conforms to the syntax defined in RFC 3987.
+ * @see https://www.w3.org/TR/rdf11-concepts/#dfn-iri
+ */
+export { Iri };
 /**
  * A m-ld transaction is a **json-rql** pattern, which represents a data read or
  * a data write. Supported pattern types are:
@@ -16,6 +23,7 @@ import { Iri } from '@m-ld/jsonld';
  * - {@link Update} (the longhand way to insert or delete data)
  *
  * @see [json-rql pattern](https://json-rql.org/interfaces/pattern.html)
+ * @category json-rql
  */
 export type Pattern = jrql.Pattern;
 /**
@@ -38,6 +46,7 @@ interface ReferenceConstructor {
 
 /**
  * Constructor of references from references: used similarly to e.g. `Number`
+ * @category json-rql
  */
 export const Reference: ReferenceConstructor = class implements Reference {
   readonly '@id': Iri;
@@ -62,6 +71,7 @@ interface VocabReferenceConstructor {
 
 /**
  * Constructor of vocab references from vocab references: used similarly to e.g. `Number`
+ * @category json-rql
  */
 export const VocabReference: VocabReferenceConstructor = class implements VocabReference {
   readonly '@vocab': Iri;
@@ -82,6 +92,7 @@ export type Context = jrql.Context;
 /**
  * An JSON-LD expanded term definition, as part of a domain {@link Context}.
  * @see [json-rql expandedtermdef](https://json-rql.org/interfaces/expandedtermdef.html)
+ * @category json-rql
  */
 export type ExpandedTermDef = jrql.ExpandedTermDef;
 /**
@@ -94,39 +105,108 @@ export type ExpandedTermDef = jrql.ExpandedTermDef;
  * }
  * ```
  * @see [json-rql variable](https://json-rql.org/#variable)
+ * @category json-rql
  */
 export type Variable = jrql.Variable;
 /**
- * @see [json-rql atom](https://json-rql.org/#atom)
+ * A basic atomic value used as a concrete value or in a filter. Note that the
+ * m-ld Javascript engine natively supports `Uint8Array` for binary data.
+ * @see [json-rql atom](https://json-rql.org/#atom) @category json-rql
+ * @category json-rql
  */
-export type Atom = jrql.Atom;
+export type Atom =
+  number | string | boolean | Uint8Array |
+  Variable | ValueObject | Reference | VocabReference;
+
 /**
+ * @category json-rql
  * @see [json-rql value object](https://json-rql.org/interfaces/valueobject.html)
  */
-export type ValueObject = jrql.ValueObject;
+export interface ValueObject {
+  /**
+   * Used to specify the data that is associated with a particular property in
+   * the graph. Note that:
+   * - in **json-rql** a `@value` will never be a Variable.
+   * - **m-ld** allows a `@value` to be any JSON-serialisable type, to allow for
+   * custom datatypes. If a value that is not a string, number or boolean is
+   * used and there is no corresponding custom datatype, a TypeError may be
+   * thrown.
+   * @see [JSON-LD typed-values](https://w3c.github.io/json-ld-syntax/#typed-values)
+   */
+  '@value': any;
+  /**
+   * Used to set the data type of the typed value.
+   * @see [JSON-LD typed-values](https://w3c.github.io/json-ld-syntax/#typed-values)
+   * @see [JSON-LD type-coercion](https://w3c.github.io/json-ld-syntax/#type-coercion)
+   */
+  '@type'?: Iri;
+  /**
+   * Used to specify the language for a particular string value or the default
+   * language of a JSON-LD document.
+   */
+  '@language'?: string;
+  /**
+   * The unique identity of the value in the domain. This is only used if the
+   * value is _mutable_; in practice this applies only to shared data types.
+   * @experimental
+   */
+  '@id'?: Iri;
+}
+
 /**
  * @see [json-rql value](https://json-rql.org/#value)
+ * @category json-rql
  */
-export type Value = Atom | Subject | Reference;
+export type Value = Atom | Subject;
 /**
  * The allowable types for a Subject property value, named awkwardly to avoid
  * overloading `Object`. Represents the "object" of a property, in the sense of
  * the object of discourse.
  * @see [json-rql SubjectPropertyObject](https://json-rql.org/#SubjectPropertyObject)
+ * @category json-rql
  */
 export type SubjectPropertyObject = Value | Container | SubjectPropertyObject[];
 /**
  * Used to express an ordered or unordered container of data.
  * @see [json-rql container](https://json-rql.org/interfaces/container.html)
+ * @category json-rql
  */
 export type Container = List | Set;
 /**
  * A stand-in for a Value used as a basis for filtering.
  * @see [json-rql expression](https://json-rql.org/globals.html#expression)
+ * @category json-rql
  */
-export type Expression = jrql.Atom | Constraint;
+export type Expression = Atom | Constraint;
 /** @internal */
-export { operators } from 'json-rql';
+export const operators: { [jrql: string]: { sparql: string | undefined } } = {
+  ...jrql.operators,
+  '@concat': { sparql: 'concat' },
+  '@splice': { sparql: undefined }
+};
+/** @internal */
+export type Operator = keyof typeof jrql.operators | '@concat' | '@splice';
+/**
+ * The expected type of the parameters to the `@splice` operator.
+ * @see operators
+ * @category json-rql
+ */
+export type TextSplice = [number, number, string?];
+/** @internal */
+export function isTextSplice(
+  args: Expression | (Expression | undefined)[]
+): args is TextSplice {
+  if (isArray(args)) {
+    const [index, deleteCount, content] = args;
+    // noinspection SuspiciousTypeOfGuard
+    if (typeof index == 'number' &&
+      typeof deleteCount == 'number' &&
+      (content == null || typeof content == 'string')) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Used to express an ordered set of data. A List object is reified to a Subject
@@ -166,6 +246,10 @@ export { operators } from 'json-rql';
  * > 🚧 This engine does not support use of the `@list` keyword in a JSON-LD
  * > Context term definition.
  *
+ * [[include:live-code-setup.script.html]]
+ * [[include:how-to/domain-setup.md]]
+ * [[include:how-to/lists.md]]
+ *
  * @see [m-ld Lists specification](https://spec.m-ld.org/#lists)
  * @see [json-rql list](https://json-rql.org/interfaces/list.html)
  * @category json-rql
@@ -185,7 +269,7 @@ export interface List extends Subject {
 
 /** @internal */
 export function isList(object: SubjectPropertyObject): object is List {
-  return typeof object === 'object' && '@list' in object;
+  return typeof object === 'object' && object != null && '@list' in object;
 }
 
 /**
@@ -200,21 +284,38 @@ export interface Set {
 
 /** @internal */
 export function isSet(object: SubjectPropertyObject): object is Set {
-  return typeof object === 'object' && '@set' in object;
+  return typeof object === 'object' && object != null && '@set' in object;
 }
 
 // Utility functions
-/** @internal */
+/**
+ * A value object can only have the allowed keys (not including @index)
+ * @internal
+ */
 export function isValueObject(value: SubjectPropertyObject): value is ValueObject {
-  return typeof value == 'object' && '@value' in value;
+  if (value == null || typeof value != 'object' || !('@value' in value))
+    return false;
+  for (let key in value)
+    if (key !== '@value' && key !== '@type' && key !== '@language' && key !== '@id')
+      return false;
+  return true;
 }
 
-/** @internal */
+/**
+ * Determines if the given object contains the given key, and nothing else which
+ * would translate to a graph edge.
+ * @internal
+ */
 function isUnaryObject(value: SubjectPropertyObject, theKey: string) {
-  return value != null && typeof value == 'object'
-    && theKey in value
-    && Object.entries(value).every(
-      ([key, value]) => key === theKey || value === undefined);
+  // typeof null === 'object' too
+  if (value == null || typeof value != 'object' || !(theKey in value))
+    return false;
+  for (let key in value) {
+    const v = (<any>value)[key];
+    if (!(key === theKey || v === null || (isArray(v) && v.length === 0)))
+      return false;
+  }
+  return true;
 }
 
 /** @internal */
@@ -230,6 +331,7 @@ export function isVocabReference(value: SubjectPropertyObject): value is VocabRe
 /**
  * Result declaration of a {@link Select} query.
  * Use of `'*'` specifies that all variables in the query should be returned.
+ * @category json-rql
  */
 export type Result = '*' | Variable | Variable[];
 
@@ -288,7 +390,6 @@ export interface Subject extends Pattern {
    * to a set of one or more values.
    */
   [key: string]: SubjectPropertyObject | Context | undefined;
-  // No support for inline filters
 }
 
 /** @internal */
@@ -298,6 +399,7 @@ interface SubjectConstructor {
 
 /**
  * Constructor of subjects from subjects: used similarly to e.g. `Number`
+ * @category json-rql
  */
 export const Subject: SubjectConstructor = class implements Subject {
   [key: string]: Subject['any'];
@@ -312,6 +414,7 @@ export const Subject: SubjectConstructor = class implements Subject {
  * aggregated by the Subject. An `@list` contains numeric indexes (which may be
  * numeric strings or variables). The second optional index is used for multiple
  * items being inserted at the first index, using an array.
+ * @category json-rql
  */
 export type SubjectProperty =
   Iri | Variable | '@item' | '@index' | '@type' | ['@list', number | string, number?];
@@ -326,7 +429,7 @@ export type SubjectProperty =
  */
 export function isPropertyObject(
   property: string,
-  object: Subject['any']
+  object: unknown
 ): object is SubjectPropertyObject {
   return property !== '@context' && property !== '@id' && object != null;
 }
@@ -338,29 +441,57 @@ export function isSubject(p: Pattern): p is Subject {
 
 /** @internal */
 export function isSubjectObject(o: SubjectPropertyObject): o is Subject {
-  return typeof o == 'object' && !isReference(o) && !isValueObject(o);
+  return typeof o == 'object' &&
+    !(o instanceof Uint8Array) &&
+    !isValueObject(o) &&
+    !isReference(o) &&
+    !isVocabReference(o) &&
+    !isInlineConstraint(o);
 }
-
 /**
  * An operator-based constraint of the form `{ <operator> : [<expression>...]
  * }`. The key is the operator, and the value is the array of arguments. If the
  * operator is unary, the expression need not be wrapped in an array.
  * @see [json-rql constraint](https://json-rql.org/interfaces/constraint.html)
+ * @category json-rql
  */
-export interface Constraint {
+export type Constraint = Partial<{
   /**
    * Operators are based on SPARQL expression keywords, lowercase with '@' prefix.
    * @see [json-rql operators](https://json-rql.org/globals.html#operators)
-   * @see [SPARQL
-   *   conditional](https://www.w3.org/TR/2013/REC-sparql11-query-20130321/#rConditionalOrExpression)
+   * @see [SPARQL conditional]
+   * (https://www.w3.org/TR/2013/REC-sparql11-query-20130321/#rConditionalOrExpression)
    */
-  [operator: string]: Expression | Expression[];
+  [operator in Operator]: Expression | Expression[];
   // It's not practical to constrain the types further here, see #isConstraint
+}>
+
+/** @internal */
+export function isConstraint(value: Expression | SubjectPropertyObject): value is Constraint {
+  if (value == null || typeof value != 'object')
+    return false;
+  for (let key in value)
+    if (!(key in operators))
+      return false;
+  return true;
 }
 
 /** @internal */
-export function isConstraint(value: Expression): value is Constraint {
-  return typeof value == 'object' && Object.keys(value).every(key => key in jrql.operators);
+export type ConstrainedVariable = Constraint & { '@value': Variable };
+/** @internal */
+export type InlineConstraint = Constraint | ConstrainedVariable;
+
+/** @internal */
+export function isInlineConstraint(value: SubjectPropertyObject): value is InlineConstraint {
+  if (value == null || typeof value != 'object')
+    return false;
+  let empty = true;
+  for (let key in value) {
+    if (!(key === '@value' || key in operators))
+      return false;
+    empty = false;
+  }
+  return !empty;
 }
 
 /**
@@ -453,6 +584,12 @@ export interface Group extends Pattern {
    * define [inline allowable value combinations]
    */
   '@values'?: VariableExpression | VariableExpression[];
+  /**
+   * Allows a computed value to be assigned to a variable. The variable
+   * introduced by the `@bind` clause cannot be used in the same Group, but can
+   * be returned from a Read or used in an Update.
+   */
+  '@bind'?: VariableExpression | VariableExpression[];
 }
 
 /** @internal */
@@ -469,8 +606,9 @@ export function isWriteGroup(p: Pattern): p is Group {
  * A variable expression an object whose keys are variables, and whose values
  * are expressions whose result will be assigned to the variable, e.g.
  * ```json
- * { "?averageSize" : { '@avg' : "?size" } }
+ * { "?averageSize" : { "@avg" : "?size" } }
  * ```
+ * @category json-rql
  */
 export interface VariableExpression {
   [key: string]: Expression;
@@ -479,6 +617,7 @@ export interface VariableExpression {
 /**
  * A sub-type of Pattern which matches data using a `@where` clause.
  * @see [json-rql query](https://json-rql.org/interfaces/query.html)
+ * @category json-rql
  */
 export interface Query extends Pattern {
   /**
@@ -526,9 +665,8 @@ export interface Query extends Pattern {
    * }
    * ```
    *
-   * > The Javascript engine supports exact-matches for subject identities, properties and
-   * > values. [Inline&nbsp;filters](https://json-rql.org/globals.html#inlinefilter)
-   * > will be available in future.
+   * > The Javascript engine supports filters for subject identities, properties
+   * > and values, including {@link Constraint inline&nbsp;filters}.
    */
   '@where'?: Subject | Subject[] | Group;
 }
@@ -540,6 +678,7 @@ export function isQuery(p: Pattern): p is Query {
 
 /**
  * A query pattern that reads data from the domain.
+ * @category json-rql
  */
 export interface Read extends Query {
   // No support for @limit, @orderBy etc.
@@ -564,6 +703,7 @@ export function isRead(p: Pattern): p is Read {
  *
  * Note that this type does not fully capture the details above. Use
  * {@link isWrite} to inspect a candidate pattern.
+ * @category json-rql
  */
 export type Write = Subject | Group | Update;
 
@@ -895,8 +1035,8 @@ export interface Update extends Query {
    * - If there is no `@where`, but a `@delete` clause exists, then values matched in the
    * `@delete` clause will be used.
    * - If a variable value is not matched by the `@where` or `@delete` clause as above, no
-   * insertion
-   * happens (i.e. there must exist a _complete_ solution to all variables in the `@insert`).
+   * insertion happens (i.e. there must exist a _complete_ solution to all variables in the
+   * `@insert`).
    *
    * **Note** that in the case that the `@insert` contains no variables, there is a difference
    * between matching with a `@where` and `@delete`. If a `@where` clause is provided, it _must_
@@ -929,6 +1069,41 @@ export interface Update extends Query {
    */
   '@insert'?: Subject | Subject[];
   /**
+   * Subjects with properties to be updated in the domain. By default, any
+   * subject property included will have its old value deleted and the provided
+   * value inserted, for example:
+   * ```json
+   * {
+   *   "@update": { "@id": "fred", "height": "6" }
+   * }
+   * ```
+   * is generally equivalent to:
+   * ```json
+   * {
+   *   "@delete": { "@id": "fred", "height": "?" },
+   *   "@insert": { "@id": "fred", "height": "6" }
+   * }
+   * ```
+   * All prior values are deleted, so this query form is best suited for
+   * 'registers' – properties that are expected to have a single value. Note
+   * that the default behaviour can still lead to multiple values if concurrent
+   * updates occur and no constraint exists for the property (a 'conflict').
+   *
+   * Variables may be used to match data to update. If the variable appears in
+   * the property value position the update will have no effect unless an
+   * in-line operation is used, e.g.
+   * ```json
+   * {
+   *   "@update": { "@id": "fred", "likes": { "@value": "?old", "@plus": 1 } }
+   * }
+   * ```
+   *
+   * {@link SharedDatatype Shared data types} operating on the data may change
+   * the default behaviour to make an `@update` logically different to a
+   * `@delete` and an `@insert`, particularly when using an in-line operation.
+   */
+  '@update'?: Subject | Subject[];
+  /**
    * If this key is included and the value is truthy, this update is an
    * _agreement_. Use of an agreement will guarantee that all clones converge on
    * the "agreed" data state (although they may continue to change thereafter).
@@ -948,9 +1123,11 @@ export interface Update extends Query {
    * An update with a falsy flag may be automatically upgraded to an agreement
    * by a constraint.
    *
-   * > 🚧 Agreements are an experimental feature. Please contact us to discuss
+   * > 🧪 Agreements are an experimental feature. Please contact us to discuss
    * your use-case.
    *
+   * @see {@link https://github.com/m-ld/m-ld-security-spec/blob/main/design/suac.md the white
+   *   paper}
    * @experimental
    */
   '@agree'?: any;
@@ -958,7 +1135,7 @@ export interface Update extends Query {
 
 /** @internal */
 export function isUpdate(p: Pattern): p is Update {
-  return '@insert' in p || '@delete' in p;
+  return '@insert' in p || '@delete' in p || '@update' in p;
 }
 
 /**
@@ -969,6 +1146,7 @@ export function isUpdate(p: Pattern): p is Update {
  * - Optionally, when moving items in a list.
  *
  * @see [m-ld lists specification](https://spec.m-ld.org/#lists)
+ * @category json-rql
  */
 export interface Slot extends Subject {
   /**

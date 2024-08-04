@@ -1,4 +1,4 @@
-import * as cuid from 'cuid';
+import cuid from 'cuid';
 
 /**
  * Utility to normalise a property value according to **m-ld**
@@ -10,8 +10,9 @@ import * as cuid from 'cuid';
  * @param value the value to normalise to an array
  * @category Utility
  */
-export function array<T>(value?: T | T[] | null): T[] {
-  return value == null ? [] : ([] as T[]).concat(value).filter(v => v != null);
+export function array<T>(value?: T | T[] | null): NonNullable<T>[] {
+  return value == null ? [] : ([] as T[])
+    .concat(value).filter((v: T): v is NonNullable<T> => v != null);
 }
 
 /**
@@ -38,10 +39,13 @@ export function shortId(spec?: string) {
 }
 
 /**
- * Utility to generate a unique short UUID for use in a MeldConfig
+ * Utility to generate a unique short UUID for use in a MeldConfig; actually
+ * a CUID starting with the character `c` and containing only lowercase
+ * US-English letters and digits. (Note that this is not an RFC 4122 UUID.)
  *
  * @category Utility
+ * @see https://github.com/paralleldrive/cuid#original-documentation-follows
  */
 export function uuid() {
-  return cuid()
+  return cuid();
 }

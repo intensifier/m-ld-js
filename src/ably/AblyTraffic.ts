@@ -1,7 +1,7 @@
-import { Future } from '../engine/util';
 import * as Ably from 'ably';
-import { Subject, Observable, asyncScheduler, of, SchedulerLike } from 'rxjs';
+import { asyncScheduler, Observable, of, SchedulerLike, Subject } from 'rxjs';
 import { concatMap, delay } from 'rxjs/operators';
+import { Future } from '../engine/Future';
 
 export interface AblyTrafficConfig {
   /**
@@ -60,7 +60,7 @@ export class AblyTraffic {
   }
 
   subscribe(channel: Ably.Types.RealtimeChannelPromise,
-    handler: (data: any, name: string, clientId: string) => void): Promise<void> {
+    handler: (data: any, name: string, clientId: string) => void): Promise<unknown> {
     return channel.subscribe(message =>
       handler(message.data, message.name, message.clientId));
   }
